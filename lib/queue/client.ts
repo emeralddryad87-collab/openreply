@@ -91,7 +91,11 @@ export function getDMQueue(): Queue<DmQueueJob> {
         // failure (e.g. an Instagram rate-limit window) has passed. Failure
         // detail is still preserved in DmLog.
         removeOnFail: { age: 300, count: 2000 },
-        attempts: 3,
+        // 2 = first send + one retry. Meta often returns a generic error 1
+        // after the DM has actually been delivered, so every extra retry sends
+        // the same message again. One retry covers genuine transient failures
+        // without spamming the recipient.
+        attempts: 2,
         backoff: {
           type: "custom",
         },
