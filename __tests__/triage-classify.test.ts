@@ -28,6 +28,20 @@ describe("classifyCanned", () => {
     expect(classifyCanned(text)).toBe("thanks");
   });
 
+  it.each([
+    "已追蹤", "已追蹤✅", "追蹤了喔", "我已經追蹤了", "已追踪", "已關注", "已关注了", "有追蹤",
+    "已追蹤 謝謝", "好的已追蹤", "已追蹤你了～", "followed", "I followed you!", "已 follow",
+  ])("treats %s as followed", (text) => {
+    expect(classifyCanned(text)).toBe("followed");
+  });
+
+  it.each([
+    "還沒追蹤", "沒有追蹤", "追蹤了但沒收到", "已追蹤可是沒有連結", "怎麼追蹤", "要追蹤嗎", "追蹤",
+    "已追蹤？", "追蹤了還是不行",
+  ])("leaves %s for a human or the model", (text) => {
+    expect(classifyCanned(text)).toBeNull();
+  });
+
   it.each(["好的", "ok", "收到", "👍", "🙏🙏", "嗯嗯", "好喔", "可以", "讚"])(
     "treats %s as a bare acknowledgement",
     (text) => {

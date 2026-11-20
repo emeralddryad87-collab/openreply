@@ -37,6 +37,7 @@ import {
  *
  *   "no questions" / "all clear" / "got it"  → the sign-off line
  *   "thanks"                                 → the thanks line
+ *   "I followed you"                         → the tap-the-button line
  *   a question the page answers              → an answer written from that page only
  *   "is this an AI?"                         → "yes", and "do you want the owner?"
  *   wants the owner (or says yes to that)    → the owner is told; one line says so
@@ -357,7 +358,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   if (canned === "ack") {
     return record("ack", "IGNORED", { reason: REASON.ack });
   }
-  if (canned === "no_problem" || canned === "thanks") {
+  if (canned === "no_problem" || canned === "thanks" || canned === "followed") {
     return sayOnce(canned, CANNED_REPLIES[canned]);
   }
 

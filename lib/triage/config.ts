@@ -25,6 +25,8 @@ export const CANNED_REPLIES = {
   // "no questions" / "all clear" / "got it"
   no_problem: "好的哦，如果有任何問題都歡迎來問我~",
   thanks: "不用客氣~",
+  // "I followed you", typed instead of tapping the button that sends the link.
+  followed: "追蹤後請按上一則訊息的按鈕，就會收到連結～",
 } as const;
 
 // When someone asks whether an AI is replying: always say yes, and ask whether

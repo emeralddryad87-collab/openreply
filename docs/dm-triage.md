@@ -6,6 +6,7 @@ Handles the inbound DMs that no campaign keyword claimed.
 |---|---|
 | "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | fixed reply: 好的哦，如果有任何問題都歡迎來問我~ |
 | "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ |
+| "I followed you" (已追蹤, 追蹤了, …), typed instead of tapping the button | fixed reply: 追蹤後請按上一則訊息的按鈕，就會收到連結～ |
 | a bare acknowledgement (好的, ok, 👍) | nothing |
 | a question the page they were sent answers | an answer written from that page's steps, ending with （自動回覆） |
 | "is this an AI?" / "is this the real person?" | always: 是的，這是 AI 自動回覆哦～你是想找本人嗎？ A yes hands the conversation to the owner; a no gets the sign-off line. |

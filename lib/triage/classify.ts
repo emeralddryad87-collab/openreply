@@ -4,6 +4,7 @@
  *
  *   "no questions" / "all clear" / "got it"   the sign-off line
  *   "thanks"                                  the thanks line
+ *   "I followed you" (已追蹤)                  the tap-the-button line
  *   a bare acknowledgement (好的, ok, 👍)      nothing
  *   "is this an AI?"                          the disclosure line
  *   "I want the owner"                        hand over to the owner
@@ -14,7 +15,7 @@
  * Whatever is not recognised here goes on to the model, or to the owner.
  */
 
-export type CannedKind = "no_problem" | "thanks" | "ack";
+export type CannedKind = "no_problem" | "thanks" | "followed" | "ack";
 
 // Traditional and simplified forms are both listed: the audience writes both.
 const NO_PROBLEM = [
@@ -37,6 +38,20 @@ const UNDERSTOOD = [
   "理解", "理解了", "都理解", "都理解了",
   "知道了", "都知道了",
   "gotit", "noted", "understood", "iunderstand", "allclear", "clear", "isee",
+];
+
+// People who are asked to follow before getting their link often type that
+// they did, instead of tapping the button that checks it and sends the link.
+const FOLLOWED = [
+  "已追蹤", "已經追蹤", "已追蹤了", "已經追蹤了", "追蹤了", "追蹤好了", "追蹤完成", "已完成追蹤",
+  "我追蹤了", "我已追蹤", "我已經追蹤", "我已經追蹤了", "我有追蹤", "我有追蹤了", "有追蹤", "有追蹤了",
+  "已追蹤你", "已追蹤你了", "追蹤你了", "已按追蹤", "按追蹤了", "已追", "追了",
+  "已追踪", "已经追踪", "已追踪了", "已经追踪了", "追踪了", "追踪好了", "追踪完成", "已完成追踪",
+  "我追踪了", "我已追踪", "我已经追踪", "我已经追踪了", "我有追踪", "有追踪", "已追踪你", "追踪你了",
+  "已關注", "已經關注", "已關注了", "已經關注了", "關注了", "我關注了", "我已關注", "我已經關注了",
+  "已关注", "已经关注", "已关注了", "已经关注了", "关注了", "我关注了", "我已关注", "我已经关注了",
+  "已follow", "已經follow", "已经follow", "follow了", "我follow了",
+  "followed", "ifollowed", "ifollowedyou", "alreadyfollowed", "following", "imfollowing",
 ];
 
 // A bare "no" on its own answers "any questions?". Followed by another word it
@@ -81,6 +96,7 @@ const TOKENS: { text: string; kind: CannedKind }[] = [
   ...NO_PROBLEM.map((text) => ({ text, kind: "no_problem" as const })),
   ...UNDERSTOOD.map((text) => ({ text, kind: "no_problem" as const })),
   ...THANKS.map((text) => ({ text, kind: "thanks" as const })),
+  ...FOLLOWED.map((text) => ({ text, kind: "followed" as const })),
   ...FILLER.map((text) => ({ text, kind: "ack" as const })),
 ]
   .map((t) => ({ ...t, text: normalize(t.text) }))
@@ -137,6 +153,8 @@ export function classifyCanned(text: string): CannedKind | null {
   const kinds = consume(cleaned.replace(PARTICLES, ""), []) ?? consume(cleaned, []);
   if (!kinds || kinds.length === 0) return null;
 
+  // "已追蹤，謝謝" is someone waiting for their link: that comes first.
+  if (kinds.includes("followed")) return "followed";
   // "沒問題，謝謝" answers the question we asked, so it gets that reply.
   if (kinds.includes("no_problem")) return "no_problem";
   if (kinds.includes("thanks")) return "thanks";

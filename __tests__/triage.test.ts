@@ -257,6 +257,29 @@ describe("runTriage", () => {
       }
     );
 
+    it("tells someone who typed that they followed to tap the button", async () => {
+      const outcome = await send("已追蹤");
+      expect(outcome).toMatchObject({ category: "followed", action: "REPLIED" });
+      expect(sent()).toEqual(["追蹤後請按上一則訊息的按鈕，就會收到連結～"]);
+      expect(mockAnswerFromPages).not.toHaveBeenCalled();
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("says that once: typing it again does not get the line again, or a notice", async () => {
+      alreadySent({ replies: 1, lines: ["追蹤後請按上一則訊息的按鈕，就會收到連結～"] });
+      const outcome = await send("追蹤了");
+      expect(outcome?.action).toBe("IGNORED");
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("sends someone who followed but got nothing to the owner", async () => {
+      const outcome = await send("已追蹤可是沒有收到連結");
+      expect(outcome?.action).toBe("ESCALATED");
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+    });
+
     it("answers thanks with the thanks line", async () => {
       await send("謝謝你！");
       expect(sent()).toEqual([THANKS]);
