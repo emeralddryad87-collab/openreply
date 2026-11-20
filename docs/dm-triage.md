@@ -4,14 +4,25 @@ Handles the inbound DMs that no campaign keyword claimed.
 
 | The sender wrote | What happens |
 |---|---|
-| "no questions" (沒有問題, 沒問題, …) | fixed reply: 有問題都可以來問我哦 |
+| "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | fixed reply: 好的哦，如果有任何問題都歡迎來問我~ |
 | "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ |
 | a bare acknowledgement (好的, ok, 👍) | nothing |
-| a question the page they were sent answers | an answer written from that page only, ending with （自動回覆） |
-| anything else, including anything with a question mark | no reply; the owner is notified |
+| a question the page they were sent answers | an answer written from that page's steps, ending with （自動回覆） |
+| "is this an AI?" / "is this the real person?" | always: 是的，這是 AI 自動回覆哦～你是想找本人嗎？ A yes hands the conversation to the owner; a no gets the sign-off line. |
+| asks for the owner in person | the owner is notified; fixed reply: 好的，已經幫你轉給本人了～ Nothing more is sent to that person for 24 hours. |
+| collaboration, the owner's courses, anything else | no reply; the owner is notified |
+
+The fixed lines live in `lib/triage/config.ts`. Only the page answer is written
+by the model.
+
+Every kind is recognised two ways. A phrase list catches the common wordings
+without calling a model, in every mode. In 全開 and 試跑 the model also
+recognises wordings the list does not know ("目前沒有什麼問題喔，都清楚"); it
+only chooses the kind and never writes those replies, and a sign-off that is
+long or asks anything still goes to the owner.
 
 It is off for every account until it is switched on, and while it is off the app
-behaves exactly as before.
+sends exactly what it sent before.
 
 ## The switch
 
@@ -48,6 +59,9 @@ Roll out in that order. The same panel shows what to check between steps:
   job can never send twice.
 - After the owner replies to someone by hand, nothing is sent to that person for
   24 hours. A real question from them in that time is still flagged to the owner.
+- The same fixed line is not sent to the same person twice within 24 hours, so
+  "了解" → line → "好的" → line cannot loop. (The AI disclosure is the exception:
+  it is given every time it is asked for.)
 - One person gets at most `TRIAGE_DAILY_REPLY_CAP` (default 3) automatic replies
   per 24 hours.
 - The model may only answer from the page text; "not on the page" always goes to
@@ -61,7 +75,8 @@ Instagram echoes every message the account sends, whoever typed it. The worker
 marks a conversation as bot-active for three minutes each time it is about to
 send; an echo inside that window is the bot's, any other echo is the owner's.
 Handing a message to the owner sends nothing and so sets no mark, which is what
-lets the owner's answer be recognised.
+lets the owner's answer be recognised. The mark is written whether or not triage
+is on, so there is no blind moment right after it is switched on.
 
 ## Setup
 

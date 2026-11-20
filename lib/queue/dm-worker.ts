@@ -28,7 +28,6 @@ import {
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { runTriage } from "@/lib/triage";
-import { getTriageModeFor } from "@/lib/triage/settings";
 import { markBotActivity } from "@/lib/triage/state";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
@@ -1216,14 +1215,17 @@ function jobUserId(job: Job<DmQueueJob>): string | null {
 /**
  * Mark the conversation as bot-active so the echo of what the worker sends is
  * not mistaken for the owner replying by hand (see lib/triage/state.ts).
- * Skipped entirely while triage is off, and never allowed to fail a job.
+ * Never allowed to fail a job.
+ *
+ * Done whether or not triage is on: the mark is one short-lived key, and
+ * making it depend on the switch left a gap right after switching on, when
+ * the web app already read echoes but this process still believed it was off.
  */
 async function markBotActive(
   instagramAccountId: string,
   userId: string
 ): Promise<void> {
   try {
-    if ((await getTriageModeFor(instagramAccountId)) === "off") return;
     await markBotActivity(instagramAccountId, userId);
   } catch (error) {
     console.error("[Triage] Could not mark bot activity:", error);

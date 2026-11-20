@@ -55,12 +55,12 @@ const MODES: { value: TriageMode; label: string; hint: string }[] = [
   {
     value: "canned",
     label: "只開固定回覆",
-    hint: "對方說「沒有問題」「謝謝」會自動回，其他的通知你。",
+    hint: "對方說「沒問題」「了解」「謝謝」會自動回固定句；問是不是 AI 會照實說是。其他的通知你。",
   },
   {
     value: "full",
     label: "全開",
-    hint: "固定回覆，再加上照留言連結頁的內容回答問題。答不出來的通知你。",
+    hint: "固定回覆，再加上照留言連結頁的步驟回答問題。合作、課程和答不出來的通知你。",
   },
 ];
 

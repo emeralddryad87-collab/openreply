@@ -34,6 +34,9 @@ const { fakeRedis } = vi.hoisted(() => {
       async exists(key: string) {
         return live(key) ? 1 : 0;
       },
+      async del(key: string) {
+        return store.delete(key) ? 1 : 0;
+      },
     },
   };
 });
@@ -42,12 +45,17 @@ vi.mock("@/lib/queue/client", () => ({ getRedisConnection: () => fakeRedis }));
 
 import {
   claimNotifySlot,
+  clearAskedHuman,
   getLastOwnerReplyAt,
   getWorkerCapabilities,
+  handedOffRecently,
+  markAskedHuman,
   markBotActivity,
+  markHandoff,
   ownerRepliedRecently,
   recordEcho,
   recordWorkerCapabilities,
+  wasAskedHuman,
 } from "@/lib/triage/state";
 
 const MINUTE = 60 * 1000;
@@ -109,6 +117,43 @@ describe("telling the owner's replies from the bot's", () => {
     await markBotActivity("ig_1", "user_1");
     await recordEcho("ig_1", "user_1");
     expect(await getLastOwnerReplyAt("ig_1")).toBeNull();
+  });
+});
+
+describe("the 'do you want the owner?' question", () => {
+  it("stays open for half a day, per conversation", async () => {
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(false);
+    await markAskedHuman("ig_1", "user_1");
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(true);
+    expect(await wasAskedHuman("ig_1", "user_2")).toBe(false);
+    vi.advanceTimersByTime(11 * HOUR);
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(true);
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(false);
+  });
+
+  it("closes as soon as it is answered", async () => {
+    await markAskedHuman("ig_1", "user_1");
+    await clearAskedHuman("ig_1", "user_1");
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(false);
+  });
+});
+
+describe("handing a conversation to the owner", () => {
+  it("keeps the bot out of that conversation for 24 hours", async () => {
+    expect(await handedOffRecently("ig_1", "user_1")).toBe(false);
+    await markHandoff("ig_1", "user_1");
+    expect(await handedOffRecently("ig_1", "user_1")).toBe(true);
+    expect(await handedOffRecently("ig_1", "user_2")).toBe(false);
+    vi.advanceTimersByTime(23 * HOUR);
+    expect(await handedOffRecently("ig_1", "user_1")).toBe(true);
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await handedOffRecently("ig_1", "user_1")).toBe(false);
+  });
+
+  it("is not the same thing as the owner having replied", async () => {
+    await markHandoff("ig_1", "user_1");
+    expect(await ownerRepliedRecently("ig_1", "user_1")).toBe(false);
   });
 });
 

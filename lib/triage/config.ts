@@ -18,14 +18,31 @@ export function parseTriageMode(value: unknown): TriageMode {
   return TRIAGE_MODES.includes(value as TriageMode) ? (value as TriageMode) : "off";
 }
 
+// The fixed lines. Every one of them is the account owner's own wording or was
+// approved by them; nothing sent to a sender is improvised except an answer
+// written from the sender's page.
 export const CANNED_REPLIES = {
-  no_problem: "有問題都可以來問我哦",
+  // "no questions" / "all clear" / "got it"
+  no_problem: "好的哦，如果有任何問題都歡迎來問我~",
   thanks: "不用客氣~",
 } as const;
 
+// When someone asks whether an AI is replying: always say yes, and ask whether
+// they want the owner in person.
+export const AI_DISCLOSURE_REPLY = "是的，這是 AI 自動回覆哦～你是想找本人嗎？";
+
+// When someone asks for the owner in person, after the owner has been told.
+export const HANDOFF_REPLY = "好的，已經幫你轉給本人了～";
+
 // Appended to AI-written answers only. Meta recommends telling people when a
-// reply is automated; the two fixed lines above are left as they are.
+// reply is automated; the fixed lines above are left as they are.
 export const AI_REPLY_SUFFIX = "\n（自動回覆）";
+
+/** How long "do you want the owner?" stays open for a yes or a no. */
+export const ASKED_HUMAN_SECONDS = 12 * 60 * 60;
+
+/** After someone asks for the owner, send them nothing more for this long. */
+export const HANDOFF_QUIET_SECONDS = 24 * 60 * 60;
 
 /** Max automatic replies to one person per rolling 24 hours. */
 export function getDailyReplyCap(): number {

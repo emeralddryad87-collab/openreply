@@ -1,6 +1,8 @@
 import { getRedisConnection } from "@/lib/queue/client";
 import {
+  ASKED_HUMAN_SECONDS,
   BOT_ACTIVITY_SECONDS,
+  HANDOFF_QUIET_SECONDS,
   NOTIFY_COOLDOWN_SECONDS,
   OWNER_QUIET_SECONDS,
 } from "@/lib/triage/config";
@@ -84,6 +86,50 @@ export async function ownerRepliedRecently(
   userId: string
 ): Promise<boolean> {
   return (await getRedisConnection().exists(ownerKey(accountId, userId))) === 1;
+}
+
+const askedHumanKey = (accountId: string, userId: string) =>
+  `triage:asked-human:${accountId}:${userId}`;
+const handoffKey = (accountId: string, userId: string) =>
+  `triage:handoff:${accountId}:${userId}`;
+
+/**
+ * The sender was just asked "do you want the owner in person?". Their next
+ * short "yes" or "no" is an answer to that, not an ordinary acknowledgement.
+ */
+export async function markAskedHuman(accountId: string, userId: string): Promise<void> {
+  await getRedisConnection().set(
+    askedHumanKey(accountId, userId),
+    String(Date.now()),
+    "EX",
+    ASKED_HUMAN_SECONDS
+  );
+}
+
+export async function wasAskedHuman(accountId: string, userId: string): Promise<boolean> {
+  return (await getRedisConnection().exists(askedHumanKey(accountId, userId))) === 1;
+}
+
+export async function clearAskedHuman(accountId: string, userId: string): Promise<void> {
+  await getRedisConnection().del(askedHumanKey(accountId, userId));
+}
+
+/**
+ * The sender asked for the owner in person and the owner was told. Until the
+ * mark expires nothing automatic is sent to them: the conversation is the
+ * owner's now.
+ */
+export async function markHandoff(accountId: string, userId: string): Promise<void> {
+  await getRedisConnection().set(
+    handoffKey(accountId, userId),
+    String(Date.now()),
+    "EX",
+    HANDOFF_QUIET_SECONDS
+  );
+}
+
+export async function handedOffRecently(accountId: string, userId: string): Promise<boolean> {
+  return (await getRedisConnection().exists(handoffKey(accountId, userId))) === 1;
 }
 
 /**

@@ -41,6 +41,30 @@ describe("parseVerdict", () => {
     expect(parseVerdict("").category).toBe("other");
   });
 
+  it("passes on a sign-off, and drops any text the model wrote for it", () => {
+    expect(
+      parseVerdict('{"category":"no_question","answer":"好的，掰掰","reason":"對方說都清楚了"}')
+    ).toEqual({ category: "no_question", answer: null, reason: "對方說都清楚了" });
+    expect(parseVerdict('{"category":"thanks","answer":null,"reason":"只是道謝"}')).toEqual({
+      category: "thanks",
+      answer: null,
+      reason: "只是道謝",
+    });
+  });
+
+  it("gives a sign-off a reason even when the model gave none", () => {
+    expect(parseVerdict('{"category":"thanks","answer":null}').reason).not.toBe("");
+  });
+
+  it.each(["asks_if_ai", "wants_human"])(
+    "passes on %s, again without any text the model wrote",
+    (category) => {
+      expect(
+        parseVerdict(JSON.stringify({ category, answer: "我是真人喔", reason: "r" }))
+      ).toEqual({ category, answer: null, reason: "r" });
+    }
+  );
+
   it("declines a category it does not know", () => {
     expect(
       parseVerdict('{"category":"send_anyway","answer":"好","reason":"r"}').category
@@ -62,6 +86,12 @@ describe("buildMessages", () => {
     expect(system.role).toBe("system");
     expect(user.content).toContain("【頁面 1：音效】\n步驟一");
     expect(user.content).toContain("【對方的訊息】\n怎麼裝");
+  });
+
+  it("tells the model when the sender has no page", () => {
+    const [, user] = buildMessages("謝謝", []);
+    expect(user.content).toContain("沒有對應的頁面");
+    expect(user.content).toContain("【對方的訊息】");
   });
 
   it("truncates an oversized page", () => {
@@ -187,11 +217,23 @@ describe("answerFromPages", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("declines without calling the model when the sender has no page", async () => {
+  it("never answers a question for a sender with no page, whatever the model says", async () => {
     configure();
-    const fetchMock = stubModel("{}");
-    expect((await answerFromPages("怎麼裝", [])).category).toBe("other");
-    expect(fetchMock).not.toHaveBeenCalled();
+    stubModel('{"category":"page_question","answer":"照第一步做。","reason":"r"}');
+    const verdict = await answerFromPages("怎麼裝", []);
+    expect(verdict.category).toBe("other");
+    expect(verdict.answer).toBeNull();
+  });
+
+  it("still recognises a sign-off from a sender with no page", async () => {
+    configure();
+    const fetchMock = stubModel('{"category":"no_question","answer":null,"reason":"都清楚了"}');
+    expect(await answerFromPages("目前沒有什麼問題喔，都清楚", [])).toEqual({
+      category: "no_question",
+      answer: null,
+      reason: "都清楚了",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns the model's answer when it stays on the page", async () => {

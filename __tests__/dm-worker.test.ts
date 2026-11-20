@@ -128,14 +128,12 @@ vi.mock("bullmq", () => {
   };
 });
 
-const { mockRunTriage, mockGetTriageModeFor, mockMarkBotActivity } = vi.hoisted(() => ({
+const { mockRunTriage, mockMarkBotActivity } = vi.hoisted(() => ({
   mockRunTriage: vi.fn(),
-  mockGetTriageModeFor: vi.fn(async () => "off"),
   mockMarkBotActivity: vi.fn(),
 }));
 
 vi.mock("@/lib/triage", () => ({ runTriage: mockRunTriage }));
-vi.mock("@/lib/triage/settings", () => ({ getTriageModeFor: mockGetTriageModeFor }));
 vi.mock("@/lib/triage/state", () => ({ markBotActivity: mockMarkBotActivity }));
 
 import { createDMWorker } from "../lib/queue/dm-worker";
@@ -1029,30 +1027,18 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockRunTriage).not.toHaveBeenCalled();
   });
 
-  it("should leave Redis alone around a job while triage is off", async () => {
-    const processor = getProcessor();
-    await processor(createMockMessageJob());
-
-    expect(mockMarkBotActivity).not.toHaveBeenCalled();
-  });
-
   it("should mark the conversation bot-active just before a keyword reply goes out", async () => {
-    mockGetTriageModeFor.mockResolvedValue("dry_run");
-
     const processor = getProcessor();
     await processor(createMockMessageJob());
 
-    expect(mockGetTriageModeFor).toHaveBeenCalledWith("ig_456");
     expect(mockMarkBotActivity).toHaveBeenCalledTimes(1);
     expect(mockMarkBotActivity).toHaveBeenCalledWith("ig_456", "commenter_999");
     expect(mockMarkBotActivity.mock.invocationCallOrder[0]).toBeLessThan(
       mockSendDirectMessage.mock.invocationCallOrder[0]
     );
-    mockGetTriageModeFor.mockResolvedValue("off");
   });
 
   it("should not mark a DM it only hands to triage, so the owner's answer is seen as theirs", async () => {
-    mockGetTriageModeFor.mockResolvedValue("full");
     mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
 
     const processor = getProcessor();
@@ -1060,7 +1046,6 @@ describe("DM Worker — DM keyword trigger", () => {
 
     expect(mockRunTriage).toHaveBeenCalledTimes(1);
     expect(mockMarkBotActivity).not.toHaveBeenCalled();
-    mockGetTriageModeFor.mockResolvedValue("off");
   });
 
   it("should pass a Story reply to triage flagged as one", async () => {
@@ -1074,25 +1059,37 @@ describe("DM Worker — DM keyword trigger", () => {
     );
   });
 
-  it("should mark the conversation bot-active around a comment job when triage is on", async () => {
-    mockGetTriageModeFor.mockResolvedValue("canned");
-
+  it("should mark the conversation bot-active around a comment job", async () => {
     const processor = getProcessor();
     await processor(createMockJob());
 
     expect(mockMarkBotActivity).toHaveBeenCalledTimes(2);
     expect(mockMarkBotActivity).toHaveBeenCalledWith("ig_456", "commenter_999");
-    mockGetTriageModeFor.mockResolvedValue("off");
   });
 
-  it("should still process the job when the triage setting cannot be read", async () => {
-    mockGetTriageModeFor.mockRejectedValue(new Error("db down"));
+  it("should mark the conversation bot-active around a button-tap job", async () => {
+    const processor = getProcessor();
+    await processor(createMockPostbackJob());
+
+    expect(mockMarkBotActivity).toHaveBeenCalledWith("ig_456", "commenter_999");
+  });
+
+  it("should still send the reply when the bot-active mark cannot be written", async () => {
+    mockMarkBotActivity.mockRejectedValue(new Error("redis down"));
 
     const processor = getProcessor();
     await processor(createMockMessageJob());
 
     expect(mockSendDirectMessage).toHaveBeenCalled();
-    mockGetTriageModeFor.mockResolvedValue("off");
+    mockMarkBotActivity.mockReset();
+  });
+
+  it("should still run a comment job when the bot-active mark cannot be written", async () => {
+    mockMarkBotActivity.mockRejectedValue(new Error("redis down"));
+
+    const processor = getProcessor();
+    await expect(processor(createMockJob())).resolves.toBeUndefined();
+    mockMarkBotActivity.mockReset();
   });
 
   it("should log the reply against the inbound message id for dedup", async () => {

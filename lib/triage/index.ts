@@ -2,10 +2,18 @@ import { prisma } from "@/lib/db/client";
 import { sendDirectMessage } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { answerFromPages, isAiConfigured } from "@/lib/triage/ai";
-import { classifyCanned } from "@/lib/triage/classify";
 import {
+  answersNo,
+  answersYes,
+  asksForHuman,
+  asksIfAutomated,
+  classifyCanned,
+} from "@/lib/triage/classify";
+import {
+  AI_DISCLOSURE_REPLY,
   AI_REPLY_SUFFIX,
   CANNED_REPLIES,
+  HANDOFF_REPLY,
   getDailyReplyCap,
   getEligibleDays,
   parseTriageMode,
@@ -14,17 +22,29 @@ import {
 import { notifyOwner } from "@/lib/triage/notify";
 import {
   claimNotifySlot,
+  clearAskedHuman,
+  handedOffRecently,
+  markAskedHuman,
   markBotActivity,
+  markHandoff,
   ownerRepliedRecently,
+  wasAskedHuman,
 } from "@/lib/triage/state";
 
 /**
  * DM triage: decide what to do with an inbound DM that no campaign keyword
  * claimed.
  *
- *   "no questions" / "thanks"      → one fixed reply
- *   a question the page answers    → an answer written from that page only
- *   anything else                  → no reply; the owner is told
+ *   "no questions" / "all clear" / "got it"  → the sign-off line
+ *   "thanks"                                 → the thanks line
+ *   a question the page answers              → an answer written from that page only
+ *   "is this an AI?"                         → "yes", and "do you want the owner?"
+ *   wants the owner (or says yes to that)    → the owner is told; one line says so
+ *   collaboration, courses, anything else    → no reply; the owner is told
+ *
+ * Each kind is recognised by a phrase list first and, in the modes that use
+ * one, by the model. Only the page answer is model-written text; every other
+ * reply is a fixed line from config.ts.
  *
  * Guard rails, in the order they apply:
  *   - Off unless switched on for the account (Settings page).
@@ -34,8 +54,10 @@ import {
  *     logged, so private conversations never end up in this app's tables.
  *   - Each message is claimed with a log row before anything is sent, so it
  *     can be handled at most once even if the job runs twice.
- *   - If the owner replied by hand in the last 24h, nothing is sent to that
- *     person; a real question from them is still flagged to the owner.
+ *   - If the owner replied by hand in the last 24h, or the sender asked for the
+ *     owner, nothing is sent to that person; a real question from them is
+ *     still flagged to the owner.
+ *   - The same fixed line is not sent to the same person twice within 24h.
  *   - A person gets at most N automatic replies per 24h.
  *   - In dry_run nothing is sent; the log records what would have been.
  *
@@ -74,13 +96,34 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const REASON = {
   ack: "只是回應，不用回",
   ownerActive: "你 24 小時內親手回過這個人，沒有自動回",
+  handedOff: "對方說要找本人，已經通知過你，這段時間不自動回",
   cap: "今天自動回這個人的次數到上限了",
+  repeated: "同一句 24 小時內回過這個人了，不重複",
   notCanned: "不是固定回覆能處理的",
   aiNotConfigured: "AI 還沒設定，沒辦法照頁面回答",
   aiFailed: "AI 呼叫失敗",
   noToken: "這個帳號沒有可用的 Instagram 授權",
   sendFailed: "發送失敗",
+  signOffUnsure: "看起來只是收尾，但訊息比較長或帶了問句，交給你確認",
+  askedIfAi: "對方問是不是 AI：照實回答，並問要不要找本人",
+  wantsHuman: "對方要找本人",
+  wantsHumanYes: "問過要不要找本人，對方說要",
+  declinedHuman: "問過要不要找本人，對方說不用",
 } as const;
+
+const SHORT_MESSAGE_MAX_CHARS = 60;
+const ASKS_SOMETHING = /[?？嗎吗]|請問|请问|怎麼|怎么|為什麼|为什么|如何/;
+
+const isShort = (text: string) => text.trim().length <= SHORT_MESSAGE_MAX_CHARS;
+
+/**
+ * Short and asking nothing: the only messages a fixed line may answer on the
+ * model's say-so. Anything longer, or with a question in it, is more than a
+ * sign-off whatever the model made of it, and goes to the owner.
+ */
+function isPlainSignOff(text: string): boolean {
+  return isShort(text) && !ASKS_SOMETHING.test(text);
+}
 
 /** Prisma's code for "a row with this unique key already exists". */
 function isUniqueViolation(error: unknown): boolean {
@@ -180,52 +223,54 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     return { category, action, replyText: extra.replyText ?? null };
   };
 
+  const tellOwner = (reason: string) =>
+    notifyOwner({
+      instagramAccountId: account.instagramId,
+      senderId,
+      senderName,
+      messageText,
+      reason,
+    });
+
   // Tell the owner, at most once per person inside the cooldown.
   const notify = async (reason: string) => {
-    if (await claimNotifySlot(account.instagramId, senderId)) {
-      await notifyOwner({
-        instagramAccountId: account.instagramId,
-        senderId,
-        senderName,
-        messageText,
-        reason,
-      });
-    }
+    if (await claimNotifySlot(account.instagramId, senderId)) await tellOwner(reason);
   };
 
   const canned = classifyCanned(messageText);
-  if (canned === "ack") {
-    return record("ack", "IGNORED", { reason: REASON.ack });
+
+  const [ownerActive, handedOff, askedHuman] = await Promise.all([
+    ownerRepliedRecently(account.instagramId, senderId),
+    handedOffRecently(account.instagramId, senderId),
+    wasAskedHuman(account.instagramId, senderId),
+  ]);
+
+  // The conversation is the owner's — they replied by hand, or the sender
+  // asked for them. Nothing automatic is sent. A message that is more than a
+  // pleasantry is still flagged, so a follow-up question does not get buried
+  // under newer DMs.
+  if (ownerActive || handedOff) {
+    const reason = ownerActive ? REASON.ownerActive : REASON.handedOff;
+    if (!canned) await notify(reason);
+    return record(canned ?? "other", "SKIPPED_OWNER_ACTIVE", { reason });
   }
 
-  // The owner is handling this person: no automatic reply of any kind. A
-  // message that is more than a pleasantry is still flagged, so a follow-up
-  // question does not get buried under newer DMs.
-  if (await ownerRepliedRecently(account.instagramId, senderId)) {
-    if (!canned) await notify(REASON.ownerActive);
-    return record(canned ?? "other", "SKIPPED_OWNER_ACTIVE", {
-      reason: REASON.ownerActive,
-    });
-  }
-
-  // A dry run counts its own would-be replies, so it shows the cap exactly as
-  // the live modes would apply it.
-  const repliesToday = await prisma.triageLog.count({
-    where: {
-      instagramAccountId: account.id,
-      senderId,
-      action: mode === "dry_run" ? { in: ["REPLIED", "DRY_RUN"] } : "REPLIED",
-      createdAt: { gte: new Date(Date.now() - DAY_MS) },
-    },
-  });
-  const overCap = repliesToday >= getDailyReplyCap();
+  // What counts as "already sent" to this person. A dry run counts its own
+  // would-be replies, so it shows the limits exactly as the live modes apply them.
+  const sentToSender = {
+    instagramAccountId: account.id,
+    senderId,
+    action: mode === "dry_run" ? { in: ["REPLIED", "DRY_RUN"] } : "REPLIED",
+    createdAt: { gte: new Date(Date.now() - DAY_MS) },
+  };
 
   const deliver = async (
     category: string,
     replyText: string,
     extra: { pageKey?: string | null; reason?: string | null } = {}
   ): Promise<TriageOutcome> => {
-    if (overCap) {
+    const repliesToday = await prisma.triageLog.count({ where: sentToSender });
+    if (repliesToday >= getDailyReplyCap()) {
       return record(category, "SKIPPED_CAP", {
         ...extra,
         replyText,
@@ -256,12 +301,68 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     return record(category, "REPLIED", { ...extra, replyText });
   };
 
-  if (canned === "no_problem" || canned === "thanks") {
-    return deliver(canned, CANNED_REPLIES[canned]);
+  // A fixed line is said once. Sending "feel free to ask" again when the
+  // sender answers it with "好的" would turn two polite people into a loop.
+  const sayOnce = async (
+    category: string,
+    replyText: string,
+    reason: string | null = null,
+    whenRepeated: TriageAction = "IGNORED"
+  ): Promise<TriageOutcome> => {
+    const already = await prisma.triageLog.count({
+      where: { ...sentToSender, replyText },
+    });
+    if (already > 0) {
+      return record(category, whenRepeated, { reason: reason ?? REASON.repeated });
+    }
+    return deliver(category, replyText, { reason });
+  };
+
+  // "Is this an AI?" is always answered with yes, and with the offer of the
+  // owner in person. The offer only stays open if the sender actually saw it.
+  const disclose = async (reason: string): Promise<TriageOutcome> => {
+    const outcome = await deliver("asks_if_ai", AI_DISCLOSURE_REPLY, { reason });
+    if (outcome.action === "REPLIED") {
+      await markAskedHuman(account.instagramId, senderId);
+    }
+    return outcome;
+  };
+
+  // The sender wants the owner. The owner hears about it even inside the
+  // notice cooldown — this is the one notice that must not be dropped — and
+  // from here on the conversation is theirs.
+  const handOff = async (reason: string): Promise<TriageOutcome> => {
+    await tellOwner(reason);
+    if (mode !== "dry_run") {
+      await markHandoff(account.instagramId, senderId);
+      await clearAskedHuman(account.instagramId, senderId);
+    }
+    return sayOnce("wants_human", HANDOFF_REPLY, reason, "ESCALATED");
+  };
+
+  // We asked "do you want the owner?" — a plain yes or no answers that question.
+  if (askedHuman) {
+    if (answersYes(messageText) || asksForHuman(messageText)) {
+      return handOff(REASON.wantsHumanYes);
+    }
+    if (answersNo(messageText)) {
+      await clearAskedHuman(account.instagramId, senderId);
+      return sayOnce("no_problem", CANNED_REPLIES.no_problem, REASON.declinedHuman);
+    }
   }
 
-  // Not a stock reply. The model only runs where its answer could be used
-  // (full) or reviewed (dry_run); in canned mode this goes straight to a human.
+  if (asksIfAutomated(messageText)) return disclose(REASON.askedIfAi);
+  if (asksForHuman(messageText)) return handOff(REASON.wantsHuman);
+
+  if (canned === "ack") {
+    return record("ack", "IGNORED", { reason: REASON.ack });
+  }
+  if (canned === "no_problem" || canned === "thanks") {
+    return sayOnce(canned, CANNED_REPLIES[canned]);
+  }
+
+  // Not one of the fixed cases. The model only runs where its verdict could be
+  // used (full) or reviewed (dry_run); in canned mode this goes to the owner.
   let escalationReason: string = REASON.notCanned;
   if (mode === "full" || mode === "dry_run") {
     if (!isAiConfigured()) {
@@ -273,13 +374,33 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
           messageText,
           pages.map((p) => ({ title: p.title, content: p.content }))
         );
-        if (verdict.category === "page_question") {
-          return deliver("page_question", verdict.answer + AI_REPLY_SUFFIX, {
-            pageKey: pages[0]?.key ?? null,
-            reason: verdict.reason,
-          });
+        // For everything but a page answer the model only picks the kind; the
+        // text that goes out is ours.
+        switch (verdict.category) {
+          case "page_question":
+            return deliver("page_question", verdict.answer + AI_REPLY_SUFFIX, {
+              pageKey: pages[0]?.key ?? null,
+              reason: verdict.reason,
+            });
+          case "no_question":
+          case "thanks": {
+            if (isPlainSignOff(messageText)) {
+              const kind = verdict.category === "no_question" ? "no_problem" : "thanks";
+              return sayOnce(kind, CANNED_REPLIES[kind], verdict.reason);
+            }
+            escalationReason = REASON.signOffUnsure;
+            break;
+          }
+          case "asks_if_ai":
+            // A long message that also asks this has more in it; the owner reads it.
+            if (isShort(messageText)) return disclose(verdict.reason || REASON.askedIfAi);
+            escalationReason = verdict.reason;
+            break;
+          case "wants_human":
+            return handOff(verdict.reason || REASON.wantsHuman);
+          default:
+            escalationReason = verdict.reason;
         }
-        escalationReason = verdict.reason;
       } catch (error) {
         // The model's error text names the model and status only (see ai.ts).
         escalationReason =
@@ -288,7 +409,8 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     }
   }
 
-  // Escalate: no reply goes out, the owner hears about it.
+  // Collaboration, courses, complaints, anything unclear: no reply goes out,
+  // the owner hears about it.
   await notify(escalationReason);
   return record("other", "ESCALATED", { reason: escalationReason });
 }
