@@ -27,6 +27,9 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
+import { runTriage } from "@/lib/triage";
+import { getTriageModeFor } from "@/lib/triage/settings";
+import { markBotActivity } from "@/lib/triage/state";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
@@ -964,6 +967,8 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   });
 
   const dedupeId = `dm:${messageId}`;
+  // Whether any campaign claimed this message. Unclaimed messages go to triage.
+  let claimed = false;
 
   for (const automation of automations) {
     const matchResult = automation.matchAnyWord
@@ -975,6 +980,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         );
 
     if (!matchResult.matched) continue;
+    claimed = true;
 
     const existingLog = await prisma.dmLog.findUnique({
       where: {
@@ -1092,6 +1098,9 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       continue;
     }
 
+    // About to send: the echo of this reply is ours, not the owner's.
+    await markBotActive(instagramAccountId, senderId);
+
     try {
       if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
@@ -1184,9 +1193,59 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       throw error;
     }
   }
+
+  // No campaign keyword matched: let triage decide (a no-op unless it is
+  // switched on for this account). It never throws and never retries.
+  if (!claimed) {
+    await runTriage({
+      instagramAccountId,
+      messageId,
+      messageText,
+      senderId,
+      isStoryReply: job.data.isStoryReply,
+    });
+  }
+}
+
+/** The Instagram user a comment, button-tap or follow-up job is about. */
+function jobUserId(job: Job<DmQueueJob>): string | null {
+  const data = job.data as Partial<ProcessCommentJob & ProcessPostbackJob>;
+  return data.commenterId ?? data.userId ?? null;
+}
+
+/**
+ * Mark the conversation as bot-active so the echo of what the worker sends is
+ * not mistaken for the owner replying by hand (see lib/triage/state.ts).
+ * Skipped entirely while triage is off, and never allowed to fail a job.
+ */
+async function markBotActive(
+  instagramAccountId: string,
+  userId: string
+): Promise<void> {
+  try {
+    if ((await getTriageModeFor(instagramAccountId)) === "off") return;
+    await markBotActivity(instagramAccountId, userId);
+  } catch (error) {
+    console.error("[Triage] Could not mark bot activity:", error);
+  }
 }
 
 async function processJob(job: Job<DmQueueJob>): Promise<void> {
+  // Comment, button-tap and follow-up jobs exist to send something, so the
+  // whole job counts as bot activity. An inbound-message job often sends
+  // nothing (triage hands it to the owner, or stays quiet), so it marks only
+  // at the point it sends — otherwise the owner answering that very message
+  // would be read as the bot's own reply and triage would not step back.
+  const userId = job.name === MESSAGE_JOB_NAME ? null : jobUserId(job);
+  if (userId) await markBotActive(job.data.instagramAccountId, userId);
+  try {
+    return await dispatchJob(job);
+  } finally {
+    if (userId) await markBotActive(job.data.instagramAccountId, userId);
+  }
+}
+
+async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   if (job.name === POSTBACK_JOB_NAME) {
     return processPostback(job as Job<ProcessPostbackJob>);
   }

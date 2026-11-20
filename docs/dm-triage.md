@@ -1,0 +1,104 @@
+# DM triage
+
+Handles the inbound DMs that no campaign keyword claimed.
+
+| The sender wrote | What happens |
+|---|---|
+| "no questions" (沒有問題, 沒問題, …) | fixed reply: 有問題都可以來問我哦 |
+| "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ |
+| a bare acknowledgement (好的, ok, 👍) | nothing |
+| a question the page they were sent answers | an answer written from that page only, ending with （自動回覆） |
+| anything else, including anything with a question mark | no reply; the owner is notified |
+
+It is off for every account until it is switched on, and while it is off the app
+behaves exactly as before.
+
+## The switch
+
+**Settings → 私訊自動分類.** One mode per Instagram account, stored in the
+database (`TriageSetting`), changeable by workspace owners and admins. A change
+takes effect within about 15 seconds; no redeploy.
+
+| Mode | Sends fixed replies | Sends page answers | Notifies the owner |
+|---|---|---|---|
+| 關閉 `off` (default) | no | no | no |
+| 試跑 `dry_run` | no, logged only | no, logged only | yes |
+| 只開固定回覆 `canned` | yes | no (the owner is notified instead) | yes |
+| 全開 `full` | yes | yes | yes |
+
+Roll out in that order. The same panel shows what to check between steps:
+
+- whether the worker has a model key and a notification channel, and whether a
+  test notice actually arrived;
+- how many pages the model can answer from;
+- when a hand-typed reply from the owner was last noticed — reply to any DM by
+  hand and this must update, otherwise the "owner is replying" guard is blind;
+- the last 24 hours of decisions and the latest 20 messages with what was (or
+  would have been) sent.
+
+`npx tsx scripts/triage-report.ts [--hours 24]` prints the same log from a shell.
+
+## Guard rails
+
+- Only people this account sent a campaign DM to in the last
+  `TRIAGE_ELIGIBLE_DAYS` (default 14) are eligible. Everyone else is not replied
+  to, not notified about and not logged.
+- Replies to Stories are left alone.
+- Each message is claimed with a log row before anything is sent, so a repeated
+  job can never send twice.
+- After the owner replies to someone by hand, nothing is sent to that person for
+  24 hours. A real question from them in that time is still flagged to the owner.
+- One person gets at most `TRIAGE_DAILY_REPLY_CAP` (default 3) automatic replies
+  per 24 hours.
+- The model may only answer from the page text; "not on the page" always goes to
+  the owner. An answer containing a link, domain or file name that is not on the
+  page is thrown away.
+- A failed send or model call is logged and never retried.
+
+### How the owner's replies are told apart from the bot's
+
+Instagram echoes every message the account sends, whoever typed it. The worker
+marks a conversation as bot-active for three minutes each time it is about to
+send; an echo inside that window is the bot's, any other echo is the owner's.
+Handing a message to the owner sends nothing and so sets no mark, which is what
+lets the owner's answer be recognised.
+
+## Setup
+
+1. Deploy. The migration `add_dm_triage` adds three tables (`TriageSetting`,
+   `TriageLog`, `TriagePage`) and changes no existing one.
+2. Load the pages the model may answer from:
+   `npx tsx scripts/triage-sync-pages.ts --pages <dir> --packs <dir> --write`
+   (run without `--write` first to preview). Re-run after adding or editing a page.
+3. Set these on the **worker** only — the web app needs none of them:
+   - notices: `TRIAGE_TELEGRAM_BOT_TOKEN` and `TRIAGE_TELEGRAM_CHAT_ID`
+   - page answers: `GROQ_API_KEY` and `TRIAGE_AI_MODEL`
+4. Switch the account to 試跑 on the Settings page and review before going further.
+
+## Notices
+
+Telegram, from a bot the owner creates:
+
+1. In Telegram, message `@BotFather`, send `/newbot`, and keep the token it gives.
+2. Open the new bot's chat and press **Start**.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser and read
+   `chat.id` from the reply.
+4. Put the token and the id in the worker's environment.
+
+The first time the worker sees a token and chat id it sends one test message
+("通知接好了") and the Settings page shows whether Telegram accepted it. A
+rejected test is retried every ten minutes; a delivered one is never repeated.
+
+A notice names the sender, quotes the message, gives the reason, and ends with a
+link to the sender's profile. At most one notice per person every 30 minutes.
+
+Instead of Telegram, `TRIAGE_NOTIFY_URL` (with optional `TRIAGE_NOTIFY_SECRET`,
+sent as the `x-triage-secret` header) receives each notice as a JSON `POST` with
+`text`, `senderId`, `senderName`, `messageText` and `reason`. Telegram wins when
+both are set.
+
+## Meta's rules this stays inside
+
+Replies go only to people who messaged first, within 24 hours of their last
+message, through the official Instagram messaging API. A human is always
+reachable, and model-written replies are labelled as automated.

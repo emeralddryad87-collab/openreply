@@ -141,6 +141,9 @@ model InstagramAccount {
   dmLogs      DmLog[]
   linkClicks  LinkClick[]
   followerSnapshots FollowerSnapshot[]
+  triageSetting     TriageSetting?
+  triageLogs        TriageLog[]
+  triagePages       TriagePage[]
 
   @@index([workspaceId])
 }
@@ -382,4 +385,67 @@ enum OperationalEventLevel {
   INFO
   WARNING
   ERROR
+}
+
+// ── DM triage (lib/triage) ─────────────────────────────────────────────────
+// Optional feature: with no TriageSetting row (or mode "off") nothing here is
+// read or written. All three tables hang off the Instagram account and go
+// away with it.
+
+/// Per-account switch for DM triage, set from the Settings page.
+model TriageSetting {
+  instagramAccountId String   @id
+  /// off | dry_run | canned | full  (see lib/triage/config.ts)
+  mode               String   @default("off")
+  updatedAt          DateTime @updatedAt
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+}
+
+/// One row per inbound DM that went through triage: what it was judged to be
+/// and what was done about it. The unique key makes a retried job a no-op.
+model TriageLog {
+  id                 String   @id @default(cuid())
+  instagramAccountId String
+  senderId           String
+  messageId          String
+  messageText        String
+  /// no_problem | thanks | ack | page_question | other | not_eligible
+  category           String
+  /// REPLIED | DRY_RUN | ESCALATED | IGNORED | SKIPPED_OWNER_ACTIVE | SKIPPED_CAP | FAILED
+  action             String
+  /// The triage mode in effect when the message was handled.
+  mode               String
+  replyText          String?
+  pageKey            String?
+  reason             String?
+  createdAt          DateTime @default(now())
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([instagramAccountId, messageId])
+  @@index([instagramAccountId, senderId, createdAt])
+  @@index([createdAt])
+}
+
+/// A landing page the triage model is allowed to answer from. Rows are written
+/// by scripts/triage-sync-pages.ts, never by the app.
+model TriagePage {
+  id                 String   @id @default(cuid())
+  instagramAccountId String
+  /// Stable identifier, the source file name without its extension.
+  key                String
+  title              String
+  /// Public URL of the page; matched against a campaign's tracked link.
+  url                String?
+  /// Comment keywords of the campaigns that hand this page out.
+  keywords           String[]
+  content            String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([instagramAccountId, key])
+  @@index([instagramAccountId])
 }

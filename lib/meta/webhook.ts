@@ -83,6 +83,9 @@ interface WebhookEntry {
       is_deleted?: boolean;
       is_unsupported?: boolean;
       attachments?: Array<{ type?: string }>;
+      // Present when the message is a reply to something: one of the account's
+      // Stories (`story`) or an earlier message in the thread (`mid`).
+      reply_to?: { mid?: string; story?: { id?: string; url?: string } };
     };
   }>;
 }
@@ -92,6 +95,8 @@ export interface WebhookMessageEvent {
   messageId: string;
   messageText: string;
   senderId: string;
+  /** True when the DM is a text reply to one of the account's Stories. */
+  isStoryReply?: boolean;
 }
 
 export interface WebhookPostbackEvent {
@@ -233,7 +238,37 @@ export function parseMessageEvents(
         messageId,
         messageText: text,
         senderId,
+        ...(message.reply_to?.story ? { isStoryReply: true } : {}),
       });
+    }
+  }
+
+  return events;
+}
+
+export interface WebhookEchoEvent {
+  instagramAccountId: string;
+  /** The user the account's message was sent to. */
+  userId: string;
+}
+
+/**
+ * Parse echoes: messages the connected account itself sent, whether through
+ * this app or typed by the owner in Instagram. DM triage uses them to notice
+ * the owner replying by hand and stay out of that conversation.
+ */
+export function parseEchoEvents(payload: WebhookPayload): WebhookEchoEvent[] {
+  const events: WebhookEchoEvent[] = [];
+
+  if (payload.object !== "instagram") return events;
+
+  for (const entry of payload.entry ?? []) {
+    for (const messaging of entry.messaging ?? []) {
+      if (!messaging.message?.is_echo) continue;
+      const accountId = entry.id ?? messaging.sender?.id;
+      const userId = messaging.recipient?.id;
+      if (!accountId || !userId || userId === accountId) continue;
+      events.push({ instagramAccountId: accountId, userId });
     }
   }
 

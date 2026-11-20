@@ -3,12 +3,15 @@ import { prisma } from "@/lib/db/client";
 import { getDMQueue } from "@/lib/queue/client";
 import {
   parseCommentEvents,
+  parseEchoEvents,
   parseMessageEvents,
   parsePostbackEvents,
   parseReadEvents,
   verifyWebhookSignature,
 } from "@/lib/meta/webhook";
 import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
+import { getTriageModeFor } from "@/lib/triage/settings";
+import { recordEcho } from "@/lib/triage/state";
 import { Prisma } from "@/app/generated/prisma/client";
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
@@ -139,6 +142,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Echoes of the account's own messages. Only DM triage cares, and only to
+    // notice the owner replying by hand; a failure here must not lose the
+    // rest of the payload.
+    for (const event of parseEchoEvents(
+      payload as Parameters<typeof parseEchoEvents>[0]
+    )) {
+      try {
+        if ((await getTriageModeFor(event.instagramAccountId)) === "off") continue;
+        await recordEcho(event.instagramAccountId, event.userId);
+      } catch (error) {
+        console.error("[Triage] Could not record echo:", error);
+      }
+    }
+
     // Inbound DMs → keyword-triggered autoreply.
     const messageEvents = parseMessageEvents(
       payload as Parameters<typeof parseMessageEvents>[0]
@@ -157,6 +174,7 @@ export async function POST(request: NextRequest) {
           messageId: event.messageId,
           messageText: event.messageText,
           senderId: event.senderId,
+          ...(event.isStoryReply ? { isStoryReply: true } : {}),
         },
         {
           // Message ids can contain characters BullMQ rejects in a job id (":"

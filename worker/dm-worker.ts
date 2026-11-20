@@ -1,6 +1,10 @@
 import { createDMWorker } from "@/lib/queue/dm-worker";
 import { recordWorkerHeartbeat } from "@/lib/ops/worker-health";
 import { reconcileComments } from "@/lib/polling/comment-reconciler";
+import { isAiConfigured } from "@/lib/triage/ai";
+import { isNotifyConfigured } from "@/lib/triage/config";
+import { checkNotifyChannel } from "@/lib/triage/notify-check";
+import { recordWorkerCapabilities } from "@/lib/triage/state";
 import os from "node:os";
 
 const worker = createDMWorker();
@@ -24,6 +28,21 @@ async function heartbeat() {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("[DM Worker] Heartbeat failed:", message);
+  }
+
+  // DM triage status for the Settings page: whether the model and the
+  // notification channel are configured in this worker's environment, and
+  // whether the channel has been proven to deliver. Kept apart from the
+  // heartbeat above so nothing here can make the worker look unhealthy.
+  try {
+    await recordWorkerCapabilities({
+      ai: isAiConfigured(),
+      notify: isNotifyConfigured(),
+      notifyCheck: await checkNotifyChannel(),
+    });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    console.error(`[Triage] Could not record worker status (${name})`);
   }
 }
 

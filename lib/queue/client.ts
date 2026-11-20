@@ -64,6 +64,9 @@ export interface ProcessMessageJob {
   messageId: string;
   messageText: string;
   senderId: string;
+  // A text reply to one of the account's Stories. Campaign keywords still
+  // apply to it; DM triage leaves it alone.
+  isStoryReply?: boolean;
 }
 
 export type DmQueueJob =

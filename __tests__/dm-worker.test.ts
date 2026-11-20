@@ -128,6 +128,16 @@ vi.mock("bullmq", () => {
   };
 });
 
+const { mockRunTriage, mockGetTriageModeFor, mockMarkBotActivity } = vi.hoisted(() => ({
+  mockRunTriage: vi.fn(),
+  mockGetTriageModeFor: vi.fn(async () => "off"),
+  mockMarkBotActivity: vi.fn(),
+}));
+
+vi.mock("@/lib/triage", () => ({ runTriage: mockRunTriage }));
+vi.mock("@/lib/triage/settings", () => ({ getTriageModeFor: mockGetTriageModeFor }));
+vi.mock("@/lib/triage/state", () => ({ markBotActivity: mockMarkBotActivity }));
+
 import { createDMWorker } from "../lib/queue/dm-worker";
 
 const usagePeriodStart = new Date("2026-05-01T00:00:00.000Z");
@@ -986,6 +996,103 @@ describe("DM Worker — DM keyword trigger", () => {
 
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
     expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("should hand a DM no campaign claimed to triage", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ messageText: "沒有問題" }));
+
+    expect(mockRunTriage).toHaveBeenCalledWith({
+      instagramAccountId: "ig_456",
+      messageId: "mid_abc",
+      messageText: "沒有問題",
+      senderId: "commenter_999",
+    });
+  });
+
+  it("should hand a DM to triage when no campaign has the DM trigger on", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockRunTriage).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not send a DM a campaign claimed to triage", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockSendDirectMessage).toHaveBeenCalled();
+    expect(mockRunTriage).not.toHaveBeenCalled();
+  });
+
+  it("should leave Redis alone around a job while triage is off", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockMarkBotActivity).not.toHaveBeenCalled();
+  });
+
+  it("should mark the conversation bot-active just before a keyword reply goes out", async () => {
+    mockGetTriageModeFor.mockResolvedValue("dry_run");
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockGetTriageModeFor).toHaveBeenCalledWith("ig_456");
+    expect(mockMarkBotActivity).toHaveBeenCalledTimes(1);
+    expect(mockMarkBotActivity).toHaveBeenCalledWith("ig_456", "commenter_999");
+    expect(mockMarkBotActivity.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendDirectMessage.mock.invocationCallOrder[0]
+    );
+    mockGetTriageModeFor.mockResolvedValue("off");
+  });
+
+  it("should not mark a DM it only hands to triage, so the owner's answer is seen as theirs", async () => {
+    mockGetTriageModeFor.mockResolvedValue("full");
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ messageText: "想找你合作" }));
+
+    expect(mockRunTriage).toHaveBeenCalledTimes(1);
+    expect(mockMarkBotActivity).not.toHaveBeenCalled();
+    mockGetTriageModeFor.mockResolvedValue("off");
+  });
+
+  it("should pass a Story reply to triage flagged as one", async () => {
+    mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ isStoryReply: true }));
+
+    expect(mockRunTriage).toHaveBeenCalledWith(
+      expect.objectContaining({ isStoryReply: true })
+    );
+  });
+
+  it("should mark the conversation bot-active around a comment job when triage is on", async () => {
+    mockGetTriageModeFor.mockResolvedValue("canned");
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockMarkBotActivity).toHaveBeenCalledTimes(2);
+    expect(mockMarkBotActivity).toHaveBeenCalledWith("ig_456", "commenter_999");
+    mockGetTriageModeFor.mockResolvedValue("off");
+  });
+
+  it("should still process the job when the triage setting cannot be read", async () => {
+    mockGetTriageModeFor.mockRejectedValue(new Error("db down"));
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockSendDirectMessage).toHaveBeenCalled();
+    mockGetTriageModeFor.mockResolvedValue("off");
   });
 
   it("should log the reply against the inbound message id for dedup", async () => {
