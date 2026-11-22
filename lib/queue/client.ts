@@ -67,6 +67,9 @@ export interface ProcessMessageJob {
   // A text reply to one of the account's Stories. Campaign keywords still
   // apply to it; DM triage leaves it alone.
   isStoryReply?: boolean;
+  // Set when the DM is a picture, video, voice note or file with no text.
+  // Campaigns never see these; they go to DM triage only.
+  attachmentKind?: "image" | "video" | "audio" | "file";
 }
 
 export type DmQueueJob =

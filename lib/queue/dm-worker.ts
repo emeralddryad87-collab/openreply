@@ -948,6 +948,19 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const { instagramAccountId, messageId, messageText, senderId } = job.data;
 
+  // A picture or file with no text: nothing for a keyword campaign to match
+  // (an "any word" campaign must not fire on it either), so it goes to triage.
+  if (job.data.attachmentKind) {
+    await runTriage({
+      instagramAccountId,
+      messageId,
+      messageText: "",
+      senderId,
+      attachmentKind: job.data.attachmentKind,
+    });
+    return;
+  }
+
   const automations = await prisma.automation.findMany({
     where: {
       dmTriggerEnabled: true,

@@ -3,6 +3,7 @@ import {
   ASKED_HUMAN_SECONDS,
   BOT_ACTIVITY_SECONDS,
   HANDOFF_QUIET_SECONDS,
+  NOTICE_THREAD_SECONDS,
   NOTIFY_COOLDOWN_SECONDS,
   OWNER_QUIET_SECONDS,
 } from "@/lib/triage/config";
@@ -132,9 +133,64 @@ export async function handedOffRecently(accountId: string, userId: string): Prom
   return (await getRedisConnection().exists(handoffKey(accountId, userId))) === 1;
 }
 
+const noticeKey = (accountId: string, userId: string) =>
+  `triage:notice:${accountId}:${userId}`;
+
+export interface NoticeLine {
+  /** When the sender's message arrived, in ms. */
+  at: number;
+  text: string;
+}
+
+/**
+ * The one notice in the owner's chat that carries a person's messages: which
+ * Telegram message it is, what it shows, and when the phone last rang for it.
+ */
+export interface NoticeThread {
+  messageId: number;
+  startedAt: number;
+  pingedAt: number;
+  lines: NoticeLine[];
+}
+
+export async function getNoticeThread(
+  accountId: string,
+  userId: string
+): Promise<NoticeThread | null> {
+  const raw = await getRedisConnection().get(noticeKey(accountId, userId));
+  if (!raw) return null;
+  try {
+    const thread = JSON.parse(raw) as NoticeThread;
+    return typeof thread.messageId === "number" && Array.isArray(thread.lines) ? thread : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save the notice. It lives for a day from its first line, not from its last:
+ * a person who writes every few hours still gets a fresh notice the next day.
+ */
+export async function saveNoticeThread(
+  accountId: string,
+  userId: string,
+  thread: NoticeThread
+): Promise<void> {
+  const remaining = Math.ceil(
+    (thread.startedAt + NOTICE_THREAD_SECONDS * 1000 - Date.now()) / 1000
+  );
+  await getRedisConnection().set(
+    noticeKey(accountId, userId),
+    JSON.stringify(thread),
+    "EX",
+    Math.max(remaining, 60)
+  );
+}
+
 /**
  * Claim the right to notify the owner about this person. False means a notice
- * already went out inside the cooldown, so this one should be skipped.
+ * already went out inside the cooldown, so this one should be skipped. Used
+ * for the webhook channel; Telegram stacks instead (see notify.ts).
  */
 export async function claimNotifySlot(
   accountId: string,

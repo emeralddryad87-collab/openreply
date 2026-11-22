@@ -246,6 +246,68 @@ export function parseMessageEvents(
   return events;
 }
 
+export type AttachmentKind = "image" | "video" | "audio" | "file";
+
+const ATTACHMENT_KINDS: readonly AttachmentKind[] = ["image", "video", "audio", "file"];
+
+export interface WebhookAttachmentEvent {
+  instagramAccountId: string;
+  messageId: string;
+  senderId: string;
+  kind: AttachmentKind;
+  /** True when the attachment was sent as a reply to one of the account's Stories. */
+  isStoryReply?: boolean;
+}
+
+/**
+ * Parse inbound DMs that carry a picture, video, voice note or file and no
+ * text. parseMessageEvents drops these, because a keyword campaign has nothing
+ * to match in them. DM triage wants to know about them: a screenshot sent by
+ * someone who is stuck is exactly the message the owner must not miss.
+ *
+ * Shared posts, reels, story mentions and stickers are not included — those
+ * are people passing content around, not asking for anything.
+ */
+export function parseAttachmentEvents(
+  payload: WebhookPayload
+): WebhookAttachmentEvent[] {
+  const events: WebhookAttachmentEvent[] = [];
+
+  if (payload.object !== "instagram") return events;
+
+  for (const entry of payload.entry ?? []) {
+    for (const messaging of entry.messaging ?? []) {
+      const message = messaging.message;
+      if (!message) continue;
+      if (message.is_echo || message.is_deleted || message.is_unsupported) {
+        continue;
+      }
+      // A message with text is handled as a text message.
+      if (message.text?.trim()) continue;
+
+      const kind = ATTACHMENT_KINDS.find((k) =>
+        (message.attachments ?? []).some((a) => a.type === k)
+      );
+      const messageId = message.mid;
+      const senderId = messaging.sender?.id;
+      const accountId = entry.id ?? messaging.recipient?.id;
+
+      if (!kind || !messageId || !senderId || !accountId) continue;
+      if (senderId === accountId) continue;
+
+      events.push({
+        instagramAccountId: accountId,
+        messageId,
+        senderId,
+        kind,
+        ...(message.reply_to?.story ? { isStoryReply: true } : {}),
+      });
+    }
+  }
+
+  return events;
+}
+
 export interface WebhookEchoEvent {
   instagramAccountId: string;
   /** The user the account's message was sent to. */

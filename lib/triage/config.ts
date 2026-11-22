@@ -27,6 +27,13 @@ export const CANNED_REPLIES = {
   thanks: "不用客氣~",
   // "I followed you", typed instead of tapping the button that sends the link.
   followed: "追蹤後請按上一則訊息的按鈕，就會收到連結～",
+  // "I do not know how to use it" / "it is hard", with no word about which part.
+  stuck: "請問你是哪一步卡住了呢？可以截圖給我看嘛？",
+  // Someone who has just subscribed to an AI tool and asks where to begin.
+  where_to_start:
+    "你可以先想一下你現在目前遇到最麻煩可是又最繁雜的手頭工作，比如說 email reply 或者是回訊息，或者寫報表，其實這些都是可以用 Claude 自動化的",
+  // "Can I do this on my phone?" Every tutorial is done on a computer.
+  use_computer: "這個要用電腦才能做哦，手機目前沒辦法～",
 } as const;
 
 // When someone asks whether an AI is replying: always say yes, and ask whether
@@ -46,10 +53,14 @@ export const ASKED_HUMAN_SECONDS = 12 * 60 * 60;
 /** After someone asks for the owner, send them nothing more for this long. */
 export const HANDOFF_QUIET_SECONDS = 24 * 60 * 60;
 
-/** Max automatic replies to one person per rolling 24 hours. */
+/**
+ * Max automatic replies to one person per rolling 24 hours. Fixed lines cannot
+ * repeat (each is said once a day), so this mostly bounds page answers; past
+ * it, a real question goes to the owner instead of being dropped.
+ */
 export function getDailyReplyCap(): number {
   const n = Number.parseInt(process.env.TRIAGE_DAILY_REPLY_CAP ?? "", 10);
-  return Number.isFinite(n) && n > 0 ? n : 3;
+  return Number.isFinite(n) && n > 0 ? n : 6;
 }
 
 /**
@@ -67,8 +78,19 @@ export const OWNER_QUIET_SECONDS = 24 * 60 * 60;
 /** How long a "the bot just messaged this user" marker lives. */
 export const BOT_ACTIVITY_SECONDS = 180;
 
-/** At most one escalation notice per person within this window. */
+/** The owner's phone rings at most once per person within this window. */
 export const NOTIFY_COOLDOWN_SECONDS = 30 * 60;
+
+/** One person's messages are stacked into one notice for this long. */
+export const NOTICE_THREAD_SECONDS = 24 * 60 * 60;
+
+/** How many of a person's latest messages one notice shows. */
+export const NOTICE_MAX_LINES = 10;
+
+/** The clock the times in a notice are written in. */
+export function getNoticeTimeZone(): string {
+  return env("TRIAGE_TIMEZONE") || "Asia/Taipei";
+}
 
 // Values pasted into a hosting dashboard often arrive with a stray space or
 // line break on the end, which silently breaks a key or a URL. Trim them.

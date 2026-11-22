@@ -5,7 +5,8 @@
  *   "no questions" / "all clear" / "got it"   the sign-off line
  *   "thanks"                                  the thanks line
  *   "I followed you" (已追蹤)                  the tap-the-button line
- *   a bare acknowledgement (好的, ok, 👍)      nothing
+ *   "I don't get it" / "it's hard"            the which-step-are-you-stuck-on line
+ *   a bare acknowledgement (好的, ok, 👍)      the sign-off line as well
  *   "is this an AI?"                          the disclosure line
  *   "I want the owner"                        hand over to the owner
  *
@@ -15,7 +16,7 @@
  * Whatever is not recognised here goes on to the model, or to the owner.
  */
 
-export type CannedKind = "no_problem" | "thanks" | "followed" | "ack";
+export type CannedKind = "no_problem" | "thanks" | "followed" | "stuck" | "ack";
 
 // Traditional and simplified forms are both listed: the audience writes both.
 const NO_PROBLEM = [
@@ -40,6 +41,60 @@ const UNDERSTOOD = [
   "gotit", "noted", "understood", "iunderstand", "allclear", "clear", "isee",
 ];
 
+// Answers to "was it hard to follow?" that mean "no": not hard, or not tried
+// yet. Both close the conversation the same way as "no questions".
+const EASY_OR_LATER = [
+  "不會", "不會啊", "不會啦", "不會難", "不會很難", "不會太難", "不難", "不難啊", "不算難", "不複雜",
+  "不會很複雜", "沒有很難", "沒有難", "沒很難", "沒有很複雜", "還好", "還好啦", "還可以", "還行", "還ok",
+  "不会", "不会啊", "不会啦", "不会难", "不会很难", "不会太难", "不难", "不难啊", "不算难", "不复杂",
+  "不会很复杂", "没有很难", "没有难", "没很难", "没有很复杂", "还好", "还好啦", "还可以", "还行", "还ok",
+  "等下試試", "等下才試試", "等下再試", "等下再試試", "等一下試試", "等一下再試", "等等試試", "等等再試",
+  "晚點試試", "晚點再試", "晚點再試試", "晚一點試試", "之後試試", "之後再試", "之後再試試", "有空試試",
+  "有空再試", "有空再試試", "回家試試", "回家再試", "明天試試", "明天再試", "改天試試", "改天再試",
+  "還沒試", "還沒試過", "還沒有試", "還沒開始", "還沒開始試", "還沒", "還沒有", "還沒看", "還沒看完",
+  "還沒研究", "還在研究", "還在研究中", "還在看", "還在試", "還在摸索", "我試試", "我試試看", "試試看",
+  "我來試試", "我來試試看", "我先試試", "我先試試看", "先試試看", "正在試", "研究中", "研究一下",
+  "我研究一下", "我研究看看", "我看看", "我先看看", "先看看",
+  "等下试试", "等下才试试", "等下再试", "等下再试试", "等一下试试", "等一下再试", "等等试试", "等等再试",
+  "晚点试试", "晚点再试", "晚点再试试", "晚一点试试", "之后试试", "之后再试", "之后再试试", "有空试试",
+  "有空再试", "回家试试", "回家再试", "明天试试", "明天再试", "改天试试", "改天再试",
+  "还没试", "还没试过", "还没有试", "还没开始", "还没开始试", "还没", "还没有", "还没看", "还没看完",
+  "还没研究", "还在研究", "还在研究中", "还在看", "还在试", "还在摸索", "我试试", "我试试看", "试试看",
+  "我来试试", "我来试试看", "我先试试", "我先试试看", "先试试看", "正在试",
+  "notyet", "notyettried", "haventtried", "haventtriedyet", "willtry", "illtry", "illtryit", "letmetry",
+  "trylater", "illtrylater", "later", "nothard", "notbad", "prettyeasy", "easy",
+];
+
+// "I don't get it" / "it's hard", with no word about which part. These get one
+// question back: which step, and can you send a screenshot.
+const STUCK = [
+  "不知道如何使用", "不知道怎麼用", "不知道怎麼使用", "不知道要怎麼用", "不知道怎麼做", "不知道要怎麼做",
+  "不知道怎麼弄", "不知道怎麼操作", "不知道怎麼開始", "不知道從哪開始", "不知道從哪裡開始",
+  "不會用", "不會做", "不會弄", "不會操作", "不太會", "不太會用", "我不會用", "我不會",
+  "看不懂", "看不太懂", "我看不懂", "不懂", "不太懂", "還是不懂", "聽不懂", "搞不懂", "搞不定",
+  "還是看不懂", "還是不會", "還是不會用", "還是不太懂", "還是不明白", "還是不知道",
+  "不明白", "不太明白", "不了解", "不太了解", "不理解", "不太理解", "不清楚", "不太清楚", "還是不清楚",
+  "不是很懂", "不是很清楚", "不是很明白", "不是很了解", "有點不懂", "有點看不懂", "有點不清楚",
+  "沒看懂", "沒有看懂", "沒懂", "沒有懂", "沒聽懂", "沒有很懂", "沒有很清楚", "沒有明白", "沒有很理解",
+  "沒有很了解", "沒了解", "沒有了解",
+  "難", "好難", "很難", "太難", "太難了", "超難", "覺得難", "覺得很難", "有點難", "有難", "蠻難", "蠻難的",
+  "滿難的", "會難", "會很難", "複雜", "好複雜", "很複雜", "太複雜", "太複雜了", "有點複雜", "天哪好複雜",
+  "卡住", "卡住了", "我卡住了", "卡關", "卡關了", "做不出來", "弄不出來", "做不到",
+  "不知道怎么用", "不知道怎么使用", "不知道要怎么用", "不知道怎么做", "不知道要怎么做", "不知道怎么弄",
+  "不知道怎么操作", "不知道怎么开始", "不知道从哪开始", "不知道从哪里开始",
+  "不会用", "不会做", "不会弄", "不会操作", "不太会", "不太会用", "我不会用", "我不会",
+  "看不太懂", "还是不懂", "听不懂", "不太明白", "不太了解", "不太理解", "不太清楚", "还是不清楚",
+  "还是看不懂", "还是不会", "还是不会用", "还是不太懂", "还是不明白", "还是不知道",
+  "不是很懂", "不是很清楚", "不是很明白", "不是很了解", "有点不懂", "有点看不懂", "有点不清楚",
+  "没看懂", "没有看懂", "没懂", "没有懂", "没听懂", "没有很懂", "没有很清楚", "没有明白", "没有很理解",
+  "没有很了解", "没了解", "没有了解",
+  "难", "好难", "很难", "太难", "太难了", "超难", "觉得难", "觉得很难", "有点难", "蛮难", "蛮难的",
+  "满难的", "会难", "会很难", "复杂", "好复杂", "很复杂", "太复杂", "太复杂了", "有点复杂",
+  "卡关", "卡关了", "做不出来", "弄不出来",
+  "idontunderstand", "dontunderstand", "idontgetit", "confused", "imconfused", "toohard", "sohard",
+  "itshard", "hard", "stuck", "imstuck", "idontknowhow", "idontknowhowtouseit",
+];
+
 // People who are asked to follow before getting their link often type that
 // they did, instead of tapping the button that checks it and sends the link.
 const FOLLOWED = [
@@ -55,10 +110,11 @@ const FOLLOWED = [
 ];
 
 // A bare "no" on its own answers "any questions?". Followed by another word it
-// usually negates that word instead — 沒收到 is "I didn't get it", 目前沒有很清楚
-// is "it isn't clear yet" — and those are exactly the messages a person must
+// usually negates that word instead — 沒收到 is "I didn't get it", 還沒收到連結 is
+// "the link never came" — and those are exactly the messages a person must
 // see. So after a phrase that ends in a bare "no", only a thank-you (or the end
-// of the message) is allowed.
+// of the message) is allowed. The negations that do have a fixed meaning
+// (沒有很難, 沒看懂) are listed whole above and match first.
 const ENDS_IN_BARE_NO = /(?:沒有|沒|没有|没)$/u;
 
 const THANKS = [
@@ -69,8 +125,8 @@ const THANKS = [
   "thanks", "thankyou", "thankyousomuch", "thanksalot", "thx", "tq", "tqvm", "ty", "tysm", "3q",
 ];
 
-// Acknowledgements that carry no question, no thanks and no "I understood".
-// On their own they get no reply at all; next to a real phrase they are padding.
+// Acknowledgements that carry no question, no thanks and no "I understood":
+// usually a one-word answer to "does that make sense?".
 const FILLER = [
   "好的", "好", "好喔", "好哦", "ok", "okay", "okok", "k", "嗯", "嗯嗯", "恩", "恩恩",
   "收到", "可以", "行", "讚", "赞", "棒", "目前", "暫時", "暂时",
@@ -95,6 +151,8 @@ function normalize(text: string): string {
 const TOKENS: { text: string; kind: CannedKind }[] = [
   ...NO_PROBLEM.map((text) => ({ text, kind: "no_problem" as const })),
   ...UNDERSTOOD.map((text) => ({ text, kind: "no_problem" as const })),
+  ...EASY_OR_LATER.map((text) => ({ text, kind: "no_problem" as const })),
+  ...STUCK.map((text) => ({ text, kind: "stuck" as const })),
   ...THANKS.map((text) => ({ text, kind: "thanks" as const })),
   ...FOLLOWED.map((text) => ({ text, kind: "followed" as const })),
   ...FILLER.map((text) => ({ text, kind: "ack" as const })),
@@ -104,7 +162,9 @@ const TOKENS: { text: string; kind: CannedKind }[] = [
   .sort((a, b) => b.text.length - a.text.length);
 
 const BARE_NEGATIONS = new Set(
-  NO_PROBLEM.map(normalize).filter((text) => ENDS_IN_BARE_NO.test(text) || text === "no")
+  [...NO_PROBLEM, ...EASY_OR_LATER]
+    .map(normalize)
+    .filter((text) => ENDS_IN_BARE_NO.test(text) || text === "no")
 );
 
 /**
@@ -146,14 +206,17 @@ export function classifyCanned(text: string): CannedKind | null {
   if (/[?？]/.test(text ?? "")) return null;
 
   const cleaned = normalize(text ?? "");
-  // Emoji- or punctuation-only messages ("👍", "🙏🙏") are acknowledgements.
-  if (!cleaned) return text?.trim() ? "ack" : null;
+  // An emoji on its own ("👍", "🙏🙏") is an acknowledgement. Punctuation on its
+  // own ("...") says something is off, and is left for a person.
+  if (!cleaned) return /\p{Extended_Pictographic}/u.test(text ?? "") ? "ack" : null;
   if (cleaned.length > MAX_LENGTH) return null;
 
   const kinds = consume(cleaned.replace(PARTICLES, ""), []) ?? consume(cleaned, []);
   if (!kinds || kinds.length === 0) return null;
 
-  // "已追蹤，謝謝" is someone waiting for their link: that comes first.
+  // "謝謝，但看不懂" is someone who needs help: that comes before any courtesy.
+  if (kinds.includes("stuck")) return "stuck";
+  // "已追蹤，謝謝" is someone waiting for their link.
   if (kinds.includes("followed")) return "followed";
   // "沒問題，謝謝" answers the question we asked, so it gets that reply.
   if (kinds.includes("no_problem")) return "no_problem";

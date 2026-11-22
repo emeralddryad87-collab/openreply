@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { getDMQueue } from "@/lib/queue/client";
 import {
+  parseAttachmentEvents,
   parseCommentEvents,
   parseEchoEvents,
   parseMessageEvents,
@@ -192,6 +193,35 @@ export async function POST(request: NextRequest) {
           where: { id: webhookEvent.id },
           data: { workspaceId: account.workspaceId },
         });
+      }
+    }
+
+    // Pictures and files with no text. Only DM triage looks at these, so they
+    // are queued only while it is switched on, and a failure here must not
+    // lose the rest of the payload.
+    for (const event of parseAttachmentEvents(
+      payload as Parameters<typeof parseAttachmentEvents>[0]
+    )) {
+      try {
+        if (event.isStoryReply) continue;
+        if ((await getTriageModeFor(event.instagramAccountId)) === "off") continue;
+        await queue.add(
+          MESSAGE_JOB_NAME,
+          {
+            instagramAccountId: event.instagramAccountId,
+            messageId: event.messageId,
+            messageText: "",
+            senderId: event.senderId,
+            attachmentKind: event.kind,
+          },
+          {
+            jobId: `message_${event.instagramAccountId}_${Buffer.from(
+              event.messageId
+            ).toString("base64url")}`,
+          }
+        );
+      } catch (error) {
+        console.error("[Triage] Could not queue attachment message:", error);
       }
     }
 

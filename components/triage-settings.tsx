@@ -55,7 +55,7 @@ const MODES: { value: TriageMode; label: string; hint: string }[] = [
   {
     value: "canned",
     label: "只開固定回覆",
-    hint: "對方說「沒問題」「了解」「謝謝」會自動回固定句；問是不是 AI 會照實說是。其他的通知你。",
+    hint: "對方說「沒問題」「了解」「可以」「謝謝」「看不懂」會自動回固定句；問是不是 AI 會照實說是。其他的通知你。",
   },
   {
     value: "full",

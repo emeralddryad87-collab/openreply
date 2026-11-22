@@ -28,6 +28,15 @@ describe("triage page sync parsers", () => {
     expect(parsePack("留言關鍵字，就自動私訊連結給他。").keywords).toEqual([]);
   });
 
+  it("reads a link to a page published from Claude Code, which has its own shape", () => {
+    expect(
+      parsePack("私訊頁 https://claude.ai/code/artifact/948507a0-0b84-4b91-aae0-f336f03e1211（私人）").url
+    ).toBe("https://claude.ai/code/artifact/948507a0-0b84-4b91-aae0-f336f03e1211");
+    expect(parsePack("頁面 https://claude.ai/artifact/KddvL4fXCmhoxhPHvhZZjG 。").url).toBe(
+      "https://claude.ai/artifact/KddvL4fXCmhoxhPHvhZZjG"
+    );
+  });
+
   it("returns nothing for a write-up without either", () => {
     expect(parsePack("# 筆記")).toEqual({ keywords: [], url: null });
   });

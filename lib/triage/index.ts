@@ -21,7 +21,6 @@ import {
 } from "@/lib/triage/config";
 import { notifyOwner } from "@/lib/triage/notify";
 import {
-  claimNotifySlot,
   clearAskedHuman,
   handedOffRecently,
   markAskedHuman,
@@ -38,6 +37,11 @@ import {
  *   "no questions" / "all clear" / "got it"  → the sign-off line
  *   "thanks"                                 → the thanks line
  *   "I followed you"                         → the tap-the-button line
+ *   a bare "ok" / "可以" / 👍                 → the sign-off line as well
+ *   "I do not get it" / "it is hard"         → "which step are you stuck on?"
+ *   new to AI, asks where to begin           → the where-to-start line
+ *   "can I do this on my phone?"             → the use-a-computer line
+ *   a picture or a file                      → no reply; the owner is told
  *   a question the page answers              → an answer written from that page only
  *   "is this an AI?"                         → "yes", and "do you want the owner?"
  *   wants the owner (or says yes to that)    → the owner is told; one line says so
@@ -73,6 +77,8 @@ export interface TriageInput {
   messageText: string;
   senderId: string;
   isStoryReply?: boolean;
+  /** Set when the DM is a picture, video, voice note or file with no text. */
+  attachmentKind?: "image" | "video" | "audio" | "file";
 }
 
 export type TriageAction =
@@ -95,7 +101,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Why a message was handled the way it was. Shown to the owner on the Settings
 // page and in the notice sent to their phone, so written in their language.
 const REASON = {
-  ack: "只是回應，不用回",
+  ack: "只是回應一聲",
   ownerActive: "你 24 小時內親手回過這個人，沒有自動回",
   handedOff: "對方說要找本人，已經通知過你，這段時間不自動回",
   cap: "今天自動回這個人的次數到上限了",
@@ -110,7 +116,22 @@ const REASON = {
   wantsHuman: "對方要找本人",
   wantsHumanYes: "問過要不要找本人，對方說要",
   declinedHuman: "問過要不要找本人，對方說不用",
+  attachment: "對方傳了圖片或檔案，AI 看不到內容",
+  stillStuck: "問過哪一步卡住了，對方還是說不會",
 } as const;
+
+// How a picture or file is shown in the log and in the notice to the owner.
+const ATTACHMENT_LABEL = {
+  image: "［圖片］",
+  video: "［影片］",
+  audio: "［語音］",
+  file: "［檔案］",
+} as const;
+
+// Kinds whose reply is a courtesy. Going without one costs nothing, so when
+// the daily cap is reached these are simply not sent; anything else that hits
+// the cap is a real question, and the owner is told about it instead.
+const COURTESY = new Set(["no_problem", "thanks", "ack", "followed"]);
 
 const SHORT_MESSAGE_MAX_CHARS = 60;
 const ASKS_SOMETHING = /[?？嗎吗]|請問|请问|怎麼|怎么|為什麼|为什么|如何/;
@@ -176,6 +197,8 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
       automation: {
         select: {
           keywords: true,
+          followUpEnabled: true,
+          followUpMessage: true,
           trackedLinks: { select: { destinationUrl: true } },
         },
       },
@@ -183,6 +206,19 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   });
   if (priorLogs.length === 0) return null;
   const senderName = priorLogs.find((l) => l.commenterName)?.commenterName ?? null;
+
+  // The question the latest campaign asks after delivering its link ("does
+  // that make sense?"). A one-word DM is very often the answer to it.
+  const latest = priorLogs[0].automation;
+  const asked =
+    latest.followUpEnabled && latest.followUpMessage?.trim()
+      ? latest.followUpMessage.trim()
+      : null;
+
+  // A picture or file has no words; show what it was instead.
+  const shownText = input.attachmentKind
+    ? ATTACHMENT_LABEL[input.attachmentKind]
+    : messageText;
 
   // Claim the message. The unique key on (account, message) makes this the
   // lock: a second run of the same message fails here, before it can send.
@@ -193,7 +229,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
         instagramAccountId: account.id,
         senderId,
         messageId,
-        messageText: messageText.slice(0, 2000),
+        messageText: shownText.slice(0, 2000),
         category: "pending",
         action: "PENDING",
         mode,
@@ -224,21 +260,24 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     return { category, action, replyText: extra.replyText ?? null };
   };
 
-  const tellOwner = (reason: string) =>
-    notifyOwner({
-      instagramAccountId: account.instagramId,
-      senderId,
-      senderName,
-      messageText,
-      reason,
-    });
+  // Tell the owner. A person's messages are stacked into one notice, and the
+  // phone rings at most once per person inside the cooldown (see notify.ts);
+  // `ring` is for the notice that must not arrive silently.
+  const tellOwner = (reason: string, ring = false) =>
+    notifyOwner(
+      {
+        instagramAccountId: account.instagramId,
+        senderId,
+        senderName,
+        messageText: shownText,
+        reason,
+      },
+      { ring }
+    );
 
-  // Tell the owner, at most once per person inside the cooldown.
-  const notify = async (reason: string) => {
-    if (await claimNotifySlot(account.instagramId, senderId)) await tellOwner(reason);
-  };
+  const notify = (reason: string) => tellOwner(reason);
 
-  const canned = classifyCanned(messageText);
+  const canned = input.attachmentKind ? null : classifyCanned(messageText);
 
   const [ownerActive, handedOff, askedHuman] = await Promise.all([
     ownerRepliedRecently(account.instagramId, senderId),
@@ -254,6 +293,13 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     const reason = ownerActive ? REASON.ownerActive : REASON.handedOff;
     if (!canned) await notify(reason);
     return record(canned ?? "other", "SKIPPED_OWNER_ACTIVE", { reason });
+  }
+
+  // A picture or a file: usually the screenshot someone was asked for. Nobody
+  // but the owner can look at it.
+  if (input.attachmentKind) {
+    await notify(REASON.attachment);
+    return record("attachment", "ESCALATED", { reason: REASON.attachment });
   }
 
   // What counts as "already sent" to this person. A dry run counts its own
@@ -272,6 +318,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   ): Promise<TriageOutcome> => {
     const repliesToday = await prisma.triageLog.count({ where: sentToSender });
     if (repliesToday >= getDailyReplyCap()) {
+      if (!COURTESY.has(category)) await notify(REASON.cap);
       return record(category, "SKIPPED_CAP", {
         ...extra,
         replyText,
@@ -304,20 +351,39 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
 
   // A fixed line is said once. Sending "feel free to ask" again when the
   // sender answers it with "好的" would turn two polite people into a loop.
+  // What happens instead depends on the line: a courtesy is just left out; for
+  // a line that offered help, saying nothing would strand the sender, so the
+  // owner takes over.
   const sayOnce = async (
     category: string,
     replyText: string,
     reason: string | null = null,
-    whenRepeated: TriageAction = "IGNORED"
+    whenRepeated: "ignore" | "tell-owner" | "owner-already-told" = "ignore"
   ): Promise<TriageOutcome> => {
     const already = await prisma.triageLog.count({
       where: { ...sentToSender, replyText },
     });
-    if (already > 0) {
-      return record(category, whenRepeated, { reason: reason ?? REASON.repeated });
+    if (already === 0) return deliver(category, replyText, { reason });
+    if (whenRepeated === "ignore") {
+      return record(category, "IGNORED", { reason: reason ?? REASON.repeated });
     }
-    return deliver(category, replyText, { reason });
+    if (whenRepeated === "tell-owner") await notify(reason ?? REASON.repeated);
+    return record(category, "ESCALATED", { reason: reason ?? REASON.repeated });
   };
+
+  // "Which step are you stuck on?" is asked once. If the sender still cannot
+  // say, the bot has nothing more to offer and the owner hears about it.
+  const askWhereStuck = (reason: string | null = null) =>
+    prisma.triageLog
+      .count({ where: { ...sentToSender, replyText: CANNED_REPLIES.stuck } })
+      .then((asked) =>
+        sayOnce(
+          "stuck",
+          CANNED_REPLIES.stuck,
+          asked > 0 ? REASON.stillStuck : reason,
+          "tell-owner"
+        )
+      );
 
   // "Is this an AI?" is always answered with yes, and with the offer of the
   // owner in person. The offer only stays open if the sender actually saw it.
@@ -329,16 +395,16 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     return outcome;
   };
 
-  // The sender wants the owner. The owner hears about it even inside the
-  // notice cooldown — this is the one notice that must not be dropped — and
-  // from here on the conversation is theirs.
+  // The sender wants the owner. The phone rings for this one even if it rang
+  // for the same person a minute ago, and from here on the conversation is
+  // the owner's.
   const handOff = async (reason: string): Promise<TriageOutcome> => {
-    await tellOwner(reason);
+    await tellOwner(reason, true);
     if (mode !== "dry_run") {
       await markHandoff(account.instagramId, senderId);
       await clearAskedHuman(account.instagramId, senderId);
     }
-    return sayOnce("wants_human", HANDOFF_REPLY, reason, "ESCALATED");
+    return sayOnce("wants_human", HANDOFF_REPLY, reason, "owner-already-told");
   };
 
   // We asked "do you want the owner?" — a plain yes or no answers that question.
@@ -355,10 +421,14 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   if (asksIfAutomated(messageText)) return disclose(REASON.askedIfAi);
   if (asksForHuman(messageText)) return handOff(REASON.wantsHuman);
 
+  // A bare "可以" or 👍 is nearly always the answer to "does that make sense?",
+  // so it closes the same way as "no questions". Said once: if the line has
+  // already gone out, the acknowledgement of it is left alone.
   if (canned === "ack") {
-    return record("ack", "IGNORED", { reason: REASON.ack });
+    return sayOnce("ack", CANNED_REPLIES.no_problem, REASON.ack);
   }
-  if (canned === "no_problem" || canned === "thanks" || canned === "followed") {
+  if (canned === "stuck") return askWhereStuck();
+  if (canned) {
     return sayOnce(canned, CANNED_REPLIES[canned]);
   }
 
@@ -373,7 +443,8 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
       try {
         const verdict = await answerFromPages(
           messageText,
-          pages.map((p) => ({ title: p.title, content: p.content }))
+          pages.map((p) => ({ title: p.title, content: p.content })),
+          asked
         );
         // For everything but a page answer the model only picks the kind; the
         // text that goes out is ours.
@@ -392,6 +463,12 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
             escalationReason = REASON.signOffUnsure;
             break;
           }
+          case "stuck":
+            return askWhereStuck(verdict.reason);
+          case "where_to_start":
+            return sayOnce("where_to_start", CANNED_REPLIES.where_to_start, verdict.reason);
+          case "device":
+            return sayOnce("use_computer", CANNED_REPLIES.use_computer, verdict.reason);
           case "asks_if_ai":
             // A long message that also asks this has more in it; the owner reads it.
             if (isShort(messageText)) return disclose(verdict.reason || REASON.askedIfAi);

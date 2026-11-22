@@ -1048,6 +1048,22 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockMarkBotActivity).not.toHaveBeenCalled();
   });
 
+  it("should send a picture straight to triage and never to a campaign", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ messageText: "", attachmentKind: "image" }));
+
+    expect(mockRunTriage).toHaveBeenCalledWith({
+      instagramAccountId: "ig_456",
+      messageId: "mid_abc",
+      messageText: "",
+      senderId: "commenter_999",
+      attachmentKind: "image",
+    });
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockMarkBotActivity).not.toHaveBeenCalled();
+  });
+
   it("should pass a Story reply to triage flagged as one", async () => {
     mockMatchKeywords.mockReturnValue({ matched: false, matchedKeyword: null });
 

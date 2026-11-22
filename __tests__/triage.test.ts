@@ -19,7 +19,6 @@ const {
     ownerRepliedRecently: vi.fn(),
     handedOffRecently: vi.fn(),
     wasAskedHuman: vi.fn(),
-    claimNotifySlot: vi.fn(),
     markBotActivity: vi.fn(),
     markAskedHuman: vi.fn(),
     clearAskedHuman: vi.fn(),
@@ -54,10 +53,18 @@ const INPUT = {
   senderId: "user_1",
 };
 
+const FOLLOW_UP = "到這裏還明白嗎？想問下有什麽東西想學的呢？";
+const STUCK = "請問你是哪一步卡住了呢？可以截圖給我看嘛？";
+const WHERE_TO_START =
+  "你可以先想一下你現在目前遇到最麻煩可是又最繁雜的手頭工作，比如說 email reply 或者是回訊息，或者寫報表，其實這些都是可以用 Claude 自動化的";
+const USE_COMPUTER = "這個要用電腦才能做哦，手機目前沒辦法～";
+
 const PRIOR_LOG = {
   commenterName: "fan",
   automation: {
     keywords: ["音效"],
+    followUpEnabled: true,
+    followUpMessage: FOLLOW_UP,
     trackedLinks: [{ destinationUrl: "https://example.com/page" }],
   },
 };
@@ -123,7 +130,6 @@ describe("runTriage", () => {
     mockState.ownerRepliedRecently.mockResolvedValue(false);
     mockState.handedOffRecently.mockResolvedValue(false);
     mockState.wasAskedHuman.mockResolvedValue(false);
-    mockState.claimNotifySlot.mockResolvedValue(true);
     mockState.markBotActivity.mockResolvedValue(undefined);
     mockState.markAskedHuman.mockResolvedValue(undefined);
     mockState.clearAskedHuman.mockResolvedValue(undefined);
@@ -335,12 +341,33 @@ describe("runTriage", () => {
       expect(sent()).toEqual([THANKS]);
     });
 
-    it("ignores a bare acknowledgement without replying or notifying", async () => {
+    it.each(["可以", "好的", "ok", "👍", "嗯嗯"])(
+      "answers a bare %s with the sign-off line too: it is the reply to 'does that make sense?'",
+      async (messageText) => {
+        const outcome = await send(messageText);
+        expect(outcome).toMatchObject({ category: "ack", action: "REPLIED" });
+        expect(sent()).toEqual([SIGN_OFF]);
+        expect(mockAnswerFromPages).not.toHaveBeenCalled();
+        expect(mockNotifyOwner).not.toHaveBeenCalled();
+      }
+    );
+
+    it("leaves a bare acknowledgement of the sign-off line itself alone", async () => {
+      alreadySent({ replies: 1, lines: [SIGN_OFF] });
       const outcome = await send("好的");
       expect(outcome).toMatchObject({ category: "ack", action: "IGNORED" });
       expect(sent()).toEqual([]);
       expect(mockNotifyOwner).not.toHaveBeenCalled();
     });
+
+    it.each(["等下才试试", "還沒試", "不會", "還好"])(
+      "closes with the sign-off line when the sender says %s",
+      async (messageText) => {
+        await send(messageText);
+        expect(sent()).toEqual([SIGN_OFF]);
+        expect(mockAnswerFromPages).not.toHaveBeenCalled();
+      }
+    );
 
     it("marks the conversation bot-active before it sends, so its own echo is not read as the owner", async () => {
       await runTriage(INPUT);
@@ -370,9 +397,11 @@ describe("runTriage", () => {
       const outcome = await send("這個音效要怎麼裝");
       expect(outcome?.action).toBe("REPLIED");
       expect(sent()).toEqual(["照第一步貼指令就會裝好。\n（自動回覆）"]);
-      expect(mockAnswerFromPages).toHaveBeenCalledWith("這個音效要怎麼裝", [
-        { title: "三個音效外掛", content: "安裝步驟…" },
-      ]);
+      expect(mockAnswerFromPages).toHaveBeenCalledWith(
+        "這個音效要怎麼裝",
+        [{ title: "三個音效外掛", content: "安裝步驟…" }],
+        FOLLOW_UP
+      );
       expect(logged()).toMatchObject({ category: "page_question", pageKey: "K36" });
     });
 
@@ -411,6 +440,125 @@ describe("runTriage", () => {
     });
   });
 
+  describe("stuck, new to AI, and phones", () => {
+    it.each(["不知道如何使用", "看不懂", "覺得難", "天哪，好複雜", "沒有很清楚"])(
+      "asks %s which step they are stuck on, and for a screenshot",
+      async (messageText) => {
+        const outcome = await send(messageText);
+        expect(outcome).toMatchObject({ category: "stuck", action: "REPLIED" });
+        expect(sent()).toEqual([STUCK]);
+        expect(mockAnswerFromPages).not.toHaveBeenCalled();
+        expect(mockNotifyOwner).not.toHaveBeenCalled();
+      }
+    );
+
+    it("asks the same when the model sees that a short reply means it was hard", async () => {
+      mockAnswerFromPages.mockResolvedValue({
+        category: "stuck",
+        answer: null,
+        reason: "我們問會不會難，對方回有點",
+      });
+      await send("有點");
+      expect(sent()).toEqual([STUCK]);
+      expect(mockAnswerFromPages.mock.calls[0][2]).toBe(FOLLOW_UP);
+    });
+
+    it("does not pass on a follow-up question the campaign has switched off", async () => {
+      mockPrisma.dmLog.findMany.mockResolvedValue([
+        { ...PRIOR_LOG, automation: { ...PRIOR_LOG.automation, followUpEnabled: false } },
+      ]);
+      await send("有點");
+      expect(mockAnswerFromPages.mock.calls[0][2]).toBeNull();
+    });
+
+    it("answers a concrete question from the page instead of asking where they are stuck", async () => {
+      mockAnswerFromPages.mockResolvedValue({
+        category: "page_question",
+        answer: "解壓縮後照第二步做。",
+        reason: "頁面第二步",
+      });
+      await send("下載好ZIP然後呢？");
+      expect(sent()).toEqual(["解壓縮後照第二步做。\n（自動回覆）"]);
+    });
+
+    it("tells someone who has just subscribed where to begin, in the owner's words", async () => {
+      mockAnswerFromPages.mockResolvedValue({
+        category: "where_to_start",
+        answer: null,
+        reason: "剛訂閱，不知道怎麼更進一步運用",
+      });
+      const outcome = await send("我目前只有訂閱GPT plus\n用了蠻長一段時間\n不太清楚可以怎麼更進一步運用");
+      expect(outcome).toMatchObject({ category: "where_to_start", action: "REPLIED" });
+      expect(sent()).toEqual([WHERE_TO_START]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("tells someone who asks about using a phone to use a computer", async () => {
+      mockAnswerFromPages.mockResolvedValue({
+        category: "device",
+        answer: null,
+        reason: "問手機能不能用",
+      });
+      const outcome = await send("这个是必须要有Claude code 才能够用的对吧？如果在电话使用的话呢？");
+      expect(outcome).toMatchObject({ category: "use_computer", action: "REPLIED" });
+      expect(sent()).toEqual([USE_COMPUTER]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("hands someone who is still stuck after being asked to the owner, rather than going quiet", async () => {
+      alreadySent({ replies: 1, lines: [STUCK] });
+      const outcome = await send("還是看不懂");
+      expect(outcome?.action).toBe("ESCALATED");
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({ messageText: "還是看不懂", reason: "問過哪一步卡住了，對方還是說不會" });
+    });
+
+    it("does not repeat the phone line or the where-to-start line to the same person", async () => {
+      alreadySent({ replies: 1, lines: [USE_COMPUTER] });
+      mockAnswerFromPages.mockResolvedValue({ category: "device", answer: null, reason: "r" });
+      const outcome = await send("所以手機真的不行嗎");
+      expect(outcome?.action).toBe("IGNORED");
+      expect(sent()).toEqual([]);
+    });
+  });
+
+  describe("pictures and files", () => {
+    const picture = { ...INPUT, messageText: "", attachmentKind: "image" as const };
+
+    it("tells the owner about a screenshot, since nobody else can look at it", async () => {
+      const outcome = await runTriage(picture);
+      expect(outcome).toMatchObject({ category: "attachment", action: "ESCALATED" });
+      expect(sent()).toEqual([]);
+      expect(mockAnswerFromPages).not.toHaveBeenCalled();
+      expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({ senderName: "fan", messageText: "［圖片］" });
+      expect(claimed().messageText).toBe("［圖片］");
+    });
+
+    it("does not treat a picture as an acknowledgement, even though it has no words", async () => {
+      const outcome = await runTriage(picture);
+      expect(outcome?.category).not.toBe("ack");
+    });
+
+    it("passes every picture on without forcing the phone to ring each time", async () => {
+      await runTriage(picture);
+      expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
+    });
+
+    it("leaves pictures from people who were not sent a campaign DM alone", async () => {
+      mockPrisma.dmLog.findMany.mockResolvedValue([]);
+      expect(await runTriage(picture)).toBeNull();
+      nothingWritten();
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("still flags a picture in a conversation the owner is handling", async () => {
+      mockState.ownerRepliedRecently.mockResolvedValue(true);
+      const outcome = await runTriage(picture);
+      expect(outcome?.action).toBe("SKIPPED_OWNER_ACTIVE");
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("3. collaboration, courses and everything else", () => {
     it.each(["想找你合作 請問價格是多少", "你有開課嗎 想報名你的課程"])(
       "sends nothing for %s and tells the owner",
@@ -423,14 +571,12 @@ describe("runTriage", () => {
         const outcome = await send(messageText);
         expect(outcome?.action).toBe("ESCALATED");
         expect(sent()).toEqual([]);
-        expect(mockNotifyOwner).toHaveBeenCalledWith(
-          expect.objectContaining({
+        expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({
             senderId: "user_1",
             senderName: "fan",
             messageText,
             reason: "合作或課程，要本人回",
-          })
-        );
+          });
       }
     );
 
@@ -439,11 +585,11 @@ describe("runTriage", () => {
       expect(mockState.markBotActivity).not.toHaveBeenCalled();
     });
 
-    it("tells the owner at most once per person inside the cooldown", async () => {
-      mockState.claimNotifySlot.mockResolvedValue(false);
+    it("passes every such message on, and leaves how often the phone rings to the notice", async () => {
       const outcome = await send("想找你合作");
       expect(outcome?.action).toBe("ESCALATED");
-      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
     });
   });
 
@@ -498,9 +644,7 @@ describe("runTriage", () => {
       const outcome = await send("要");
       expect(outcome).toMatchObject({ category: "wants_human", action: "REPLIED" });
       expect(sent()).toEqual([HANDOFF]);
-      expect(mockNotifyOwner).toHaveBeenCalledWith(
-        expect.objectContaining({ senderName: "fan", messageText: "要" })
-      );
+      expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({ senderName: "fan", messageText: "要" });
       expect(mockState.markHandoff).toHaveBeenCalledWith("ig_1", "user_1");
       expect(mockState.clearAskedHuman).toHaveBeenCalledWith("ig_1", "user_1");
     });
@@ -514,11 +658,11 @@ describe("runTriage", () => {
       }
     );
 
-    it("tells the owner about a yes even inside the notice cooldown", async () => {
+    it("makes the phone ring for a yes, even if it rang for this person a minute ago", async () => {
       mockState.wasAskedHuman.mockResolvedValue(true);
-      mockState.claimNotifySlot.mockResolvedValue(false);
       await send("要");
       expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: true });
     });
 
     it("closes with the sign-off line when the sender answers no", async () => {
@@ -562,9 +706,7 @@ describe("runTriage", () => {
       });
       await send("有辦法直接跟老師本尊聊嗎");
       expect(sent()).toEqual([HANDOFF]);
-      expect(mockNotifyOwner).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "對方想跟創作者本人對話" })
-      );
+      expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({ reason: "對方想跟創作者本人對話" });
     });
 
     it("still tells the owner, without repeating the line, when they ask for the owner twice", async () => {
@@ -618,18 +760,31 @@ describe("runTriage", () => {
       expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
     });
 
-    it("flags that follow-up at most once inside the cooldown", async () => {
+    it("does not force a ring for that follow-up", async () => {
       mockState.ownerRepliedRecently.mockResolvedValue(true);
-      mockState.claimNotifySlot.mockResolvedValue(false);
       await send("這個音效要怎麼裝");
-      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
     });
 
     it("stops at the daily cap", async () => {
-      alreadySent({ replies: 3 });
+      alreadySent({ replies: 6 });
       const outcome = await runTriage(INPUT);
       expect(outcome?.action).toBe("SKIPPED_CAP");
       expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("hands a real question that hits the cap to the owner instead of dropping it", async () => {
+      alreadySent({ replies: 6 });
+      mockAnswerFromPages.mockResolvedValue({
+        category: "page_question",
+        answer: "照第一步做。",
+        reason: "r",
+      });
+      const outcome = await send("那第三步的指令要貼在哪");
+      expect(outcome?.action).toBe("SKIPPED_CAP");
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
     });
 
     it("counts only real replies toward the cap in the live modes", async () => {
@@ -693,7 +848,7 @@ describe("runTriage", () => {
     });
 
     it("applies the limits by counting its own would-be replies", async () => {
-      alreadySent({ replies: 3 });
+      alreadySent({ replies: 6 });
       const outcome = await runTriage(INPUT);
       expect(outcome?.action).toBe("SKIPPED_CAP");
       expect(mockPrisma.triageLog.count.mock.calls[0][0].where.action).toEqual({

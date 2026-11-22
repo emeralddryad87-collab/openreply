@@ -6,7 +6,11 @@ import {
   parseVerdict,
 } from "@/lib/triage/ai";
 import { formatNotice } from "@/lib/triage/notify";
-import { parseEchoEvents, parseMessageEvents } from "@/lib/meta/webhook";
+import {
+  parseAttachmentEvents,
+  parseEchoEvents,
+  parseMessageEvents,
+} from "@/lib/meta/webhook";
 
 describe("parseVerdict", () => {
   it("accepts a page answer", () => {
@@ -56,6 +60,15 @@ describe("parseVerdict", () => {
     expect(parseVerdict('{"category":"thanks","answer":null}').reason).not.toBe("");
   });
 
+  it.each(["stuck", "where_to_start", "device"])(
+    "passes on %s as a kind only: the line that goes out is the owner's",
+    (category) => {
+      expect(
+        parseVerdict(JSON.stringify({ category, answer: "你可以試試看重開機", reason: "r" }))
+      ).toEqual({ category, answer: null, reason: "r" });
+    }
+  );
+
   it.each(["asks_if_ai", "wants_human"])(
     "passes on %s, again without any text the model wrote",
     (category) => {
@@ -86,6 +99,19 @@ describe("buildMessages", () => {
     expect(system.role).toBe("system");
     expect(user.content).toContain("【頁面 1：音效】\n步驟一");
     expect(user.content).toContain("【對方的訊息】\n怎麼裝");
+  });
+
+  it("shows the model the question the campaign asks, so a one-word reply can be read", () => {
+    const [, user] = buildMessages("有點", [{ title: "t", content: "c" }], "會很難明白嗎？");
+    expect(user.content).toContain("【我們會問對方的話】\n會很難明白嗎？");
+    expect(user.content.indexOf("【我們會問對方的話】")).toBeLessThan(
+      user.content.indexOf("【對方的訊息】")
+    );
+  });
+
+  it("leaves that part out when the campaign asks nothing", () => {
+    const [, user] = buildMessages("有點", [{ title: "t", content: "c" }]);
+    expect(user.content).not.toContain("我們會問對方的話");
   });
 
   it("tells the model when the sender has no page", () => {
@@ -262,6 +288,64 @@ describe("answerFromPages", () => {
     expect(verdict.answer).toBeNull();
   });
 
+  describe("when the provider says to slow down", () => {
+    const limited = (retryAfter: string | null) => ({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name === "retry-after" ? retryAfter : null) },
+    });
+    const good = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: '{"category":"thanks","answer":null,"reason":"r"}' } }],
+      }),
+    };
+
+    it("waits the short time it was told and asks once more", async () => {
+      configure();
+      vi.useFakeTimers();
+      const fetchMock = vi.fn().mockResolvedValueOnce(limited("2")).mockResolvedValueOnce(good);
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = answerFromPages("謝謝你", pages);
+      await vi.advanceTimersByTimeAsync(1900);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      expect((await pending).category).toBe("thanks");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    it("does not wait out a long limit: the message goes to the owner", async () => {
+      configure();
+      const fetchMock = vi.fn().mockResolvedValue(limited("90"));
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(answerFromPages("怎麼裝", pages)).rejects.toThrow("回 429");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry when it is not told how long to wait", async () => {
+      configure();
+      const fetchMock = vi.fn().mockResolvedValue(limited(null));
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(answerFromPages("怎麼裝", pages)).rejects.toThrow("回 429");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("gives up after one retry", async () => {
+      configure();
+      vi.useFakeTimers();
+      const fetchMock = vi.fn().mockResolvedValue(limited("1"));
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = answerFromPages("怎麼裝", pages).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(String(await pending)).toContain("回 429");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+  });
+
   it("fails with a short reason that names the model and status, not the key", async () => {
     configure();
     stubModel("", false, 429);
@@ -281,62 +365,78 @@ describe("answerFromPages", () => {
 });
 
 describe("formatNotice", () => {
-  it("names the sender, quotes the message and links to their profile", () => {
-    const text = formatNotice({
-      instagramAccountId: "ig",
-      senderId: "u1",
-      senderName: "fan.name_1",
-      messageText: "想找你合作",
-      reason: "合作邀約",
-    });
+  // 07:53 and 08:38 UTC are 15:53 and 16:38 on the owner's clock (UTC+8).
+  const at = (hhmm: string) => Date.parse(`2026-11-21T${hhmm}:00Z`);
+  const fan = { senderName: "fan.name_1", senderId: "u1" };
+
+  it("is one person's messages, each with its time, and one link — nothing else", () => {
+    const text = formatNotice(fan, [
+      { at: at("07:53"), text: "出現這個，裝不了" },
+      { at: at("08:38"), text: "我好像裝完了" },
+    ]);
     expect(text).toBe(
-      "IG 私訊需要你回：fan.name_1\n「想找你合作」\n（合作邀約）\nhttps://www.instagram.com/fan.name_1/"
+      [
+        "IG 私訊需要你回：fan.name_1",
+        "15:53「出現這個，裝不了」",
+        "16:38「我好像裝完了」",
+        "https://www.instagram.com/fan.name_1/",
+      ].join("\n")
     );
   });
 
-  it("does not write the name as an @mention, which Telegram would link to someone else", () => {
-    const text = formatNotice({
-      instagramAccountId: "ig",
-      senderId: "u1",
-      senderName: "fan",
-      messageText: "hi",
-      reason: "",
-    });
-    expect(text).not.toContain("@fan");
+  it("carries no reason in brackets", () => {
+    const text = formatNotice(fan, [{ at: at("07:53"), text: "想找你合作" }]);
+    expect(text).not.toMatch(/[（(]/);
   });
 
-  it("falls back to the id when the name is unknown", () => {
-    expect(
-      formatNotice({
-        instagramAccountId: "ig",
-        senderId: "u1",
-        senderName: null,
-        messageText: "hi",
-        reason: "",
-      })
-    ).toBe("IG 私訊需要你回：用戶 u1\n「hi」");
+  it("keeps a message that was typed on several lines on one line", () => {
+    const text = formatNotice(fan, [{ at: at("08:38"), text: "我好像裝完了\n我再試試看，感謝您" }]);
+    expect(text.split("\n")).toHaveLength(3);
+    expect(text).toContain("16:38「我好像裝完了 我再試試看，感謝您」");
+  });
+
+  it("writes the times on the configured clock", () => {
+    vi.stubEnv("TRIAGE_TIMEZONE", "UTC");
+    expect(formatNotice(fan, [{ at: at("07:53"), text: "hi" }])).toContain("07:53「hi」");
+    vi.stubEnv("TRIAGE_TIMEZONE", "Not/AZone");
+    expect(formatNotice(fan, [{ at: at("07:53"), text: "hi" }])).toContain("15:53「hi」");
+    vi.unstubAllEnvs();
+  });
+
+  it("does not write the name as an @mention, which Telegram would link to someone else", () => {
+    expect(formatNotice({ senderName: "fan", senderId: "u1" }, [{ at: at("07:53"), text: "hi" }])).not.toContain(
+      "@fan"
+    );
+  });
+
+  it("falls back to the id, with no link, when the name is unknown", () => {
+    expect(formatNotice({ senderName: null, senderId: "u1" }, [{ at: at("07:53"), text: "hi" }])).toBe(
+      "IG 私訊需要你回：用戶 u1\n15:53「hi」"
+    );
   });
 
   it("builds no link from a name that is not a plain Instagram username", () => {
-    const text = formatNotice({
-      instagramAccountId: "ig",
-      senderId: "u1",
-      senderName: "fan/../evil?x=1",
-      messageText: "hi",
-      reason: "",
-    });
+    const text = formatNotice({ senderName: "fan/../evil?x=1", senderId: "u1" }, [
+      { at: at("07:53"), text: "hi" },
+    ]);
     expect(text).not.toContain("instagram.com");
   });
 
-  it("keeps a very long message short", () => {
-    const text = formatNotice({
-      instagramAccountId: "ig",
-      senderId: "u1",
-      senderName: "fan",
-      messageText: "字".repeat(3000),
-      reason: "",
-    });
-    expect(text.length).toBeLessThan(600);
+  it("keeps one very long message short", () => {
+    const text = formatNotice(fan, [{ at: at("07:53"), text: "字".repeat(3000) }]);
+    expect(text.length).toBeLessThan(400);
+  });
+
+  it("drops the oldest lines rather than exceed what Telegram accepts", () => {
+    const lines = Array.from({ length: 40 }, (_, i) => ({
+      at: at("07:53") + i * 60_000,
+      text: `第 ${i} 則 ` + "字".repeat(290),
+    }));
+    const text = formatNotice(fan, lines);
+    expect(text.length).toBeLessThanOrEqual(3800);
+    expect(text).toContain("第 39 則");
+    expect(text).not.toContain("第 0 則");
+    expect(text.endsWith("https://www.instagram.com/fan.name_1/")).toBe(true);
   });
 });
 
@@ -376,6 +476,83 @@ describe("parseEchoEvents", () => {
 
   it("ignores other webhook objects", () => {
     expect(parseEchoEvents({ ...payload, object: "page" } as never)).toEqual([]);
+  });
+});
+
+describe("parseAttachmentEvents", () => {
+  function payloadWith(message: Record<string, unknown>, sender = "user_2") {
+    return {
+      object: "instagram",
+      entry: [
+        {
+          id: "acct",
+          messaging: [{ sender: { id: sender }, recipient: { id: "acct" }, message }],
+        },
+      ],
+    };
+  }
+
+  it("returns a picture that came with no text", () => {
+    expect(
+      parseAttachmentEvents(
+        payloadWith({ mid: "m9", attachments: [{ type: "image" }] }) as never
+      )
+    ).toEqual([
+      { instagramAccountId: "acct", messageId: "m9", senderId: "user_2", kind: "image" },
+    ]);
+  });
+
+  it.each(["video", "audio", "file"])("returns a %s as well", (type) => {
+    const [event] = parseAttachmentEvents(
+      payloadWith({ mid: "m9", attachments: [{ type }] }) as never
+    );
+    expect(event.kind).toBe(type);
+  });
+
+  it.each(["share", "story_mention", "reel", "ig_reel", "template", "like_heart"])(
+    "ignores a %s: that is someone passing content around, not asking for help",
+    (type) => {
+      expect(
+        parseAttachmentEvents(payloadWith({ mid: "m9", attachments: [{ type }] }) as never)
+      ).toEqual([]);
+    }
+  );
+
+  it("leaves a message that has text to the text path, and that path is unchanged", () => {
+    const payload = payloadWith({ mid: "m9", text: "裝不了", attachments: [{ type: "image" }] });
+    expect(parseAttachmentEvents(payload as never)).toEqual([]);
+    expect(parseMessageEvents(payload as never)).toHaveLength(1);
+  });
+
+  it("is invisible to the text path, so no campaign can fire on a picture", () => {
+    const payload = payloadWith({ mid: "m9", attachments: [{ type: "image" }] });
+    expect(parseMessageEvents(payload as never)).toEqual([]);
+  });
+
+  it("ignores the account's own pictures, deleted ones, and other webhook objects", () => {
+    const own = payloadWith({ mid: "m9", attachments: [{ type: "image" }], is_echo: true });
+    const deleted = payloadWith({ mid: "m9", attachments: [{ type: "image" }], is_deleted: true });
+    const self = payloadWith({ mid: "m9", attachments: [{ type: "image" }] }, "acct");
+    expect(parseAttachmentEvents(own as never)).toEqual([]);
+    expect(parseAttachmentEvents(deleted as never)).toEqual([]);
+    expect(parseAttachmentEvents(self as never)).toEqual([]);
+    expect(
+      parseAttachmentEvents({
+        ...payloadWith({ mid: "m9", attachments: [{ type: "image" }] }),
+        object: "page",
+      } as never)
+    ).toEqual([]);
+  });
+
+  it("flags a picture sent as a reply to a Story", () => {
+    const [event] = parseAttachmentEvents(
+      payloadWith({
+        mid: "m9",
+        attachments: [{ type: "image" }],
+        reply_to: { story: { id: "s1" } },
+      }) as never
+    );
+    expect(event.isStoryReply).toBe(true);
   });
 });
 

@@ -17,6 +17,9 @@ describe("classifyCanned", () => {
     // "I understood" is a sign-off too.
     "都很清楚", "都理解", "了解", "瞭解了", "清楚", "都懂了", "明白了", "都清楚了喔", "知道了",
     "好的，了解", "收到 了解 謝謝", "got it", "Understood!",
+    // Answers to "was it hard?" that mean no: not hard, or not tried yet.
+    "不會", "不會啊", "還好", "還行", "不難", "沒有很難", "還可以 謝謝",
+    "等下才试试", "等下才試試", "晚點再試", "還沒試", "還沒", "我試試看", "還在研究中", "not yet",
   ])("treats %s as no_problem", (text) => {
     expect(classifyCanned(text)).toBe("no_problem");
   });
@@ -72,15 +75,31 @@ describe("classifyCanned", () => {
     }
   );
 
-  // A "no" in front of another word negates that word. These are complaints
-  // and confusion, the messages that must never get the cheerful fixed line.
+  // A "no" in front of another word negates that word. These are complaints,
+  // the messages that must never get the cheerful sign-off line.
   it.each([
-    "沒收到", "沒有收到", "沒有很清楚", "沒懂", "沒有懂", "沒有明白", "沒了解", "沒有可以",
-    "目前沒有收到", "目前沒有很清楚", "没收到", "没有很清楚", "沒看懂", "不清楚", "不太懂",
-    "還是不清楚", "no ok", "不了解", "沒有了解", "不理解", "沒有很理解", "不是很清楚", "有點不懂",
+    "沒收到", "沒有收到", "沒有可以", "目前沒有收到", "没收到", "no ok", "還沒收到", "還沒有收到連結",
+    "沒有連結", "沒有聲音",
   ])("leaves %s for a human, because the no negates what follows", (text) => {
     expect(classifyCanned(text)).toBeNull();
   });
+
+  // "I do not get it", with no word about which part.
+  it.each([
+    "不知道如何使用", "不知道怎麼用", "看不懂", "不太懂", "覺得難", "好複雜", "天哪，好複雜", "有點難",
+    "不會用", "卡住了", "不清楚", "還是不清楚", "不了解", "不理解", "不是很清楚", "有點不懂",
+    "沒看懂", "沒懂", "沒有懂", "沒有明白", "沒了解", "沒有了解", "沒有很理解", "沒有很清楚",
+    "没有很清楚", "目前沒有很清楚", "太難了😭", "看不懂 謝謝", "好的 看不太懂", "還是看不懂", "I don't understand",
+  ])("treats %s as stuck", (text) => {
+    expect(classifyCanned(text)).toBe("stuck");
+  });
+
+  it.each(["...", "。。。", "有點", "不會的話怎麼辦", "不會用的話可以問你嗎", "難在哪", "好的 但看不太懂"])(
+    "leaves %s for the model or a human",
+    (text) => {
+      expect(classifyCanned(text)).toBeNull();
+    }
+  );
 
   it("ignores empty input", () => {
     expect(classifyCanned("")).toBeNull();

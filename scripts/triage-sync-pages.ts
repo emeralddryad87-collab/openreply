@@ -1,14 +1,17 @@
 /**
  * Build the page library DM triage answers from (the TriagePage table).
  *
- *   npx tsx scripts/triage-sync-pages.ts --pages <dir> [--packs <dir>] [--out <file>]
- *                                        [--account <username>] [--write]
+ *   npx tsx scripts/triage-sync-pages.ts --pages <dir> [--packs <dir>] [--extra <dir>]
+ *                                        [--out <file>] [--account <username>] [--write]
  *
  *   --pages  folder of landing pages (*.html). Backups (*.bak*) are skipped.
  *   --packs  folder of the write-ups that record, per page, the comment keyword
  *            and the public URL (施工包_*.md). Optional; without it pages are
  *            synced with no keyword/URL and can only be matched once those are
  *            filled in.
+ *   --extra  folder of pages saved straight from their published link, for
+ *            campaigns whose page has no file in --pages. It holds the *.html
+ *            files and a urls.json that maps each file name to its link.
  *   --out    also save what was parsed as JSON, for review.
  *   --account  Instagram username the pages belong to. Optional when exactly
  *              one account is connected.
@@ -65,7 +68,10 @@ export function parsePack(markdown: string): { keywords: string[]; url: string |
     keywords.add(m[1].trim());
   }
   const url =
-    markdown.match(/https:\/\/claude\.ai\/(?:public\/)?artifacts?\/[A-Za-z0-9_-]+/)?.[0] ?? null;
+    // Both link shapes are in use: claude.ai/artifact/<id> and, for pages
+    // published from Claude Code, claude.ai/code/artifact/<uuid>.
+    markdown.match(/https:\/\/claude\.ai\/(?:public\/|code\/)?artifacts?\/[A-Za-z0-9_-]+/)?.[0] ??
+    null;
   // A keyword is one short word. Anything long or punctuated is a sentence the
   // pattern caught by accident.
   const clean = [...keywords]
@@ -110,6 +116,23 @@ export function collectPages(pagesDir: string, packsDir?: string): PageRecord[] 
   return pages;
 }
 
+/**
+ * Pages saved straight from their published link. `urls.json` in the folder
+ * maps each file name to that link, and the link is what a campaign is matched
+ * on, so these need no write-up and no keyword.
+ */
+export function collectLinkedPages(dir: string): PageRecord[] {
+  const urls = JSON.parse(readFileSync(join(dir, "urls.json"), "utf8")) as Record<
+    string,
+    string
+  >;
+  return Object.entries(urls).map(([file, url]) => {
+    const html = readFileSync(join(dir, file), "utf8");
+    const key = `link_${basename(file, extname(file))}`;
+    return { key, title: pageTitle(html, key), url, keywords: [], content: htmlToText(html) };
+  });
+}
+
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i === -1 ? undefined : process.argv[i + 1];
@@ -119,12 +142,16 @@ async function main() {
   const pagesDir = arg("pages");
   if (!pagesDir) {
     console.error(
-      "Usage: tsx scripts/triage-sync-pages.ts --pages <dir> [--packs <dir>] [--out <file>] [--account <username>] [--write]"
+      "Usage: tsx scripts/triage-sync-pages.ts --pages <dir> [--packs <dir>] [--extra <dir>] [--out <file>] [--account <username>] [--write]"
     );
     process.exit(1);
   }
 
-  const pages = collectPages(pagesDir, arg("packs"));
+  const extraDir = arg("extra");
+  const pages = [
+    ...collectPages(pagesDir, arg("packs")),
+    ...(extraDir ? collectLinkedPages(extraDir) : []),
+  ];
   for (const p of pages) {
     console.log(
       [p.key, `${p.content.length} chars`, p.keywords.join("/") || "(no keyword)", p.url ? "url ok" : "(no url)"].join(" | ")
