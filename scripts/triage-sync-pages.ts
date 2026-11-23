@@ -118,18 +118,20 @@ export function collectPages(pagesDir: string, packsDir?: string): PageRecord[] 
 
 /**
  * Pages saved straight from their published link. `urls.json` in the folder
- * maps each file name to that link, and the link is what a campaign is matched
- * on, so these need no write-up and no keyword.
+ * maps each file name to that link — the link is what a campaign is matched
+ * on — or to `{ "url": …, "keywords": […] }` when the page also has a comment
+ * keyword people might send as a DM.
  */
 export function collectLinkedPages(dir: string): PageRecord[] {
-  const urls = JSON.parse(readFileSync(join(dir, "urls.json"), "utf8")) as Record<
+  const entries = JSON.parse(readFileSync(join(dir, "urls.json"), "utf8")) as Record<
     string,
-    string
+    string | { url: string; keywords?: string[] }
   >;
-  return Object.entries(urls).map(([file, url]) => {
+  return Object.entries(entries).map(([file, entry]) => {
     const html = readFileSync(join(dir, file), "utf8");
     const key = `link_${basename(file, extname(file))}`;
-    return { key, title: pageTitle(html, key), url, keywords: [], content: htmlToText(html) };
+    const { url, keywords = [] } = typeof entry === "string" ? { url: entry } : entry;
+    return { key, title: pageTitle(html, key), url, keywords, content: htmlToText(html) };
   });
 }
 

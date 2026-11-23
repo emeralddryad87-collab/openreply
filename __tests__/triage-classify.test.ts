@@ -17,6 +17,7 @@ describe("classifyCanned", () => {
     // "I understood" is a sign-off too.
     "都很清楚", "都理解", "了解", "瞭解了", "清楚", "都懂了", "明白了", "都清楚了喔", "知道了",
     "好的，了解", "收到 了解 謝謝", "got it", "Understood!",
+    "有的", "有", "有喔", "有的 謝謝", "有試過了", "試過了", "有看懂", "有收到",
     // Answers to "was it hard?" that mean no: not hard, or not tried yet.
     "不會", "不會啊", "還好", "還行", "不難", "沒有很難", "還可以 謝謝",
     "等下才试试", "等下才試試", "晚點再試", "還沒試", "還沒", "我試試看", "還在研究中", "not yet",
@@ -94,7 +95,10 @@ describe("classifyCanned", () => {
     expect(classifyCanned(text)).toBe("stuck");
   });
 
-  it.each(["...", "。。。", "有點", "不會的話怎麼辦", "不會用的話可以問你嗎", "難在哪", "好的 但看不太懂"])(
+  it.each([
+    "...", "。。。", "有點", "不會的話怎麼辦", "不會用的話可以問你嗎", "難在哪", "好的 但看不太懂",
+    "有問題", "有一個問題", "有的話再問你", "有空嗎",
+  ])(
     "leaves %s for the model or a human",
     (text) => {
       expect(classifyCanned(text)).toBeNull();

@@ -128,12 +128,14 @@ vi.mock("bullmq", () => {
   };
 });
 
-const { mockRunTriage, mockMarkBotActivity } = vi.hoisted(() => ({
+const { mockRunTriage, mockMarkBotActivity, mockFindKeywordCampaign } = vi.hoisted(() => ({
   mockRunTriage: vi.fn(),
   mockMarkBotActivity: vi.fn(),
+  mockFindKeywordCampaign: vi.fn(async () => null as { automationId: string; keyword: string } | null),
 }));
 
 vi.mock("@/lib/triage", () => ({ runTriage: mockRunTriage }));
+vi.mock("@/lib/triage/keyword-dm", () => ({ findKeywordCampaign: mockFindKeywordCampaign }));
 vi.mock("@/lib/triage/state", () => ({ markBotActivity: mockMarkBotActivity }));
 
 import { createDMWorker } from "../lib/queue/dm-worker";
@@ -971,8 +973,8 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockPrisma.automation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          dmTriggerEnabled: true,
           isActive: true,
+          OR: [{ dmTriggerEnabled: true }],
         }),
       })
     );
@@ -1046,6 +1048,77 @@ describe("DM Worker — DM keyword trigger", () => {
 
     expect(mockRunTriage).toHaveBeenCalledTimes(1);
     expect(mockMarkBotActivity).not.toHaveBeenCalled();
+  });
+
+  describe("a campaign keyword sent as a DM", () => {
+    // How every real campaign is set up: any comment under the post fires it,
+    // it stores no keyword, and its "also reply to DMs" toggle is off.
+    const anyCommentCampaign = {
+      ...dmTriggerAutomation,
+      dmTriggerEnabled: false,
+      matchAnyWord: true,
+      keywords: [],
+    };
+
+    it("should answer it with the campaign that keyword belongs to", async () => {
+      mockFindKeywordCampaign.mockResolvedValueOnce({ automationId: "auto_789", keyword: "PDF" });
+      mockPrisma.automation.findMany.mockResolvedValue([anyCommentCampaign]);
+
+      const processor = getProcessor();
+      await processor(createMockMessageJob({ messageText: "PDF" }));
+
+      expect(mockFindKeywordCampaign).toHaveBeenCalledWith({
+        instagramAccountId: "ig_456",
+        senderId: "commenter_999",
+        messageText: "PDF",
+      });
+      expect(mockPrisma.automation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            isActive: true,
+            OR: [{ dmTriggerEnabled: true }, { id: "auto_789" }],
+          }),
+        })
+      );
+      expect(mockSendDirectMessage).toHaveBeenCalledWith(
+        "decrypted_token",
+        "ig_456",
+        "commenter_999",
+        "Hey commenter_user! Here is the link: https://example.com"
+      );
+      expect(mockRunTriage).not.toHaveBeenCalled();
+    });
+
+    it("should still ask for a follow first when the campaign requires one", async () => {
+      mockFindKeywordCampaign.mockResolvedValueOnce({ automationId: "auto_789", keyword: "PDF" });
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...anyCommentCampaign, requireFollow: true },
+      ]);
+      mockGetUserFollowStatus.mockResolvedValue(false);
+
+      const processor = getProcessor();
+      await processor(createMockMessageJob({ messageText: "PDF" }));
+
+      expect(mockSendDirectMessageWithButton).toHaveBeenCalled();
+      expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    });
+
+    it("should never let an any-comment campaign answer a DM that is not its keyword", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([anyCommentCampaign]);
+
+      const processor = getProcessor();
+      await processor(createMockMessageJob({ messageText: "這個要怎麼裝" }));
+
+      expect(mockSendDirectMessage).not.toHaveBeenCalled();
+      expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+      expect(mockRunTriage).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not look for a keyword in a picture", async () => {
+      const processor = getProcessor();
+      await processor(createMockMessageJob({ messageText: "", attachmentKind: "image" }));
+      expect(mockFindKeywordCampaign).not.toHaveBeenCalled();
+    });
   });
 
   it("should send a picture straight to triage and never to a campaign", async () => {

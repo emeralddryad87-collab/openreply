@@ -6,6 +6,7 @@ Handles the inbound DMs that no campaign keyword claimed.
 |---|---|
 | "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | fixed reply: 好的哦，如果有任何問題都歡迎來問我~ |
 | "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ |
+| a campaign keyword, or a plain request for it (PDF, 外掛, 請問外掛呢？) | answered by that campaign itself — follow gate, link button and follow-up — as if they had commented it. Once a day per person; a second ask goes to the owner. "外掛打不開" is not a request and goes to the owner too. |
 | "I followed you" (已追蹤, 追蹤了, …), typed instead of tapping the button | fixed reply: 追蹤後請按上一則訊息的按鈕，就會收到連結～ |
 | a bare acknowledgement (可以, 好的, ok, 👍) | the same sign-off line: it is nearly always the answer to "does that make sense?" |
 | "not hard", "will try later" (不會, 還好, 等下才試試, 還沒試) | the same sign-off line |

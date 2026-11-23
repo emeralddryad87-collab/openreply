@@ -28,6 +28,7 @@ import {
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { runTriage } from "@/lib/triage";
+import { findKeywordCampaign } from "@/lib/triage/keyword-dm";
 import { markBotActivity } from "@/lib/triage/state";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
@@ -961,11 +962,23 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     return;
   }
 
+  // A campaign keyword typed as a DM instead of a comment ("PDF", "請問外掛呢？")
+  // is answered by that campaign, exactly as the comment would be. Null unless
+  // DM triage is switched on and the message is such a request.
+  const keywordCampaign = await findKeywordCampaign({
+    instagramAccountId,
+    senderId,
+    messageText,
+  });
+
   const automations = await prisma.automation.findMany({
     where: {
-      dmTriggerEnabled: true,
       isActive: true,
       instagramAccount: { instagramId: instagramAccountId },
+      OR: [
+        { dmTriggerEnabled: true },
+        ...(keywordCampaign ? [{ id: keywordCampaign.automationId }] : []),
+      ],
     },
     include: {
       instagramAccount: true,
@@ -983,13 +996,21 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   let claimed = false;
 
   for (const automation of automations) {
-    const matchResult = automation.matchAnyWord
-      ? { matched: true, matchedKeyword: null }
-      : matchKeywords(
-          messageText,
-          automation.keywords,
-          automation.wholeWordMatch
-        );
+    // The keyword campaign matches by definition. Every other campaign is here
+    // because its own "also reply to DMs" toggle is on, and matches the way it
+    // always has.
+    const matchResult =
+      automation.id === keywordCampaign?.automationId
+        ? { matched: true, matchedKeyword: keywordCampaign.keyword }
+        : !automation.dmTriggerEnabled
+          ? { matched: false, matchedKeyword: null }
+          : automation.matchAnyWord
+            ? { matched: true, matchedKeyword: null }
+            : matchKeywords(
+                messageText,
+                automation.keywords,
+                automation.wholeWordMatch
+              );
 
     if (!matchResult.matched) continue;
     claimed = true;
