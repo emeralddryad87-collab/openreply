@@ -124,19 +124,29 @@ export function buildMessages(
   ];
 }
 
-/** Pull the first JSON object out of a model reply and validate its shape. */
-export function parseVerdict(raw: string): AiVerdict {
+/**
+ * The JSON object in a model reply, or null when there is none. Models wrap
+ * their answer in thinking blocks and stray prose; only the object counts.
+ */
+export function extractJsonObject(raw: string): Record<string, unknown> | null {
   const text = raw.replace(/<think>[\s\S]*?<\/think>/g, "");
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) {
-    return { category: "other", answer: null, reason: REASON.badFormat };
-  }
-
-  let parsed: unknown;
+  if (start === -1 || end <= start) return null;
   try {
-    parsed = JSON.parse(text.slice(start, end + 1));
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
+    return null;
+  }
+}
+
+/** Pull the first JSON object out of a model reply and validate its shape. */
+export function parseVerdict(raw: string): AiVerdict {
+  const parsed = extractJsonObject(raw);
+  if (!parsed) {
     return { category: "other", answer: null, reason: REASON.badFormat };
   }
 
@@ -219,23 +229,25 @@ export function isAiConfigured(): boolean {
   return Boolean(apiKey && model);
 }
 
-/**
- * Ask the model. Uses Groq's OpenAI-compatible endpoint; the request shape is
- * the standard chat-completions one, so pointing this at another provider is a
- * change to this function only.
- */
-export async function answerFromPages(
-  message: string,
-  pages: TriagePageInput[],
-  asked: string | null = null
-): Promise<AiVerdict> {
-  const { apiKey, model } = getAiConfig();
-  if (!apiKey || !model) {
-    return { category: "other", answer: null, reason: REASON.notConfigured };
-  }
+export type ChatMessage = { role: string; content: string };
 
-  // Errors thrown from here end up in front of the owner as the reason a
-  // message was handed over, so they name the kind of failure and nothing else.
+/**
+ * Send one request to the model and return the text it wrote. Uses Groq's
+ * OpenAI-compatible endpoint; the request shape is the standard
+ * chat-completions one, so pointing this at another provider is a change to
+ * this function only.
+ *
+ * Throws when the model is not configured or the call fails. Errors thrown
+ * from here end up in front of the owner as the reason a message was handed
+ * over, so they name the kind of failure and nothing else.
+ */
+export async function askModel(
+  messages: ChatMessage[],
+  options: { temperature?: number } = {}
+): Promise<string> {
+  const { apiKey, model } = getAiConfig();
+  if (!apiKey || !model) throw new Error(REASON.notConfigured);
+
   const request = () =>
     fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -245,9 +257,9 @@ export async function answerFromPages(
       },
       body: JSON.stringify({
         model,
-        temperature: 0.2,
+        temperature: options.temperature ?? 0.2,
         max_tokens: 600,
-        messages: buildMessages(message, pages, asked),
+        messages,
       }),
       signal: AbortSignal.timeout(20_000),
     });
@@ -277,7 +289,23 @@ export async function answerFromPages(
   const data = (await response.json()) as {
     choices?: { message?: { content?: string } }[];
   };
-  const verdict = parseVerdict(data.choices?.[0]?.message?.content ?? "");
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+/**
+ * Ask the model what kind of message this is, and for a page question, what
+ * the answer is.
+ */
+export async function answerFromPages(
+  message: string,
+  pages: TriagePageInput[],
+  asked: string | null = null
+): Promise<AiVerdict> {
+  if (!isAiConfigured()) {
+    return { category: "other", answer: null, reason: REASON.notConfigured };
+  }
+
+  const verdict = parseVerdict(await askModel(buildMessages(message, pages, asked)));
 
   // Without a page there is nothing to answer from, whatever the model says.
   if (verdict.category === "page_question" && pages.length === 0) {

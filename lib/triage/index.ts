@@ -10,6 +10,8 @@ import {
   classifyCanned,
   looksLikeAutoReply,
 } from "@/lib/triage/classify";
+import { dropPendingDrafts } from "@/lib/triage/draft-store";
+import { draftReply } from "@/lib/triage/draft";
 import {
   AI_DISCLOSURE_REPLY,
   AI_REPLY_SUFFIX,
@@ -21,6 +23,7 @@ import {
   type TriageMode,
 } from "@/lib/triage/config";
 import { notifyOwner } from "@/lib/triage/notify";
+import type { NoticeDraft } from "@/lib/triage/state";
 import {
   clearAskedHuman,
   handedOffRecently,
@@ -52,6 +55,10 @@ import {
  * Each kind is recognised by a phrase list first and, in the modes that use
  * one, by the model. Only the page answer is model-written text; every other
  * reply is a fixed line from config.ts.
+ *
+ * When a message is handed to the owner in full mode, the notice carries a
+ * draft reply (draft.ts). The draft is never sent from here: it goes out only
+ * if the owner presses the button under the notice (owner-actions.ts).
  *
  * Guard rails, in the order they apply:
  *   - Off unless switched on for the account (Settings page).
@@ -226,6 +233,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   // Claim the message. The unique key on (account, message) makes this the
   // lock: a second run of the same message fails here, before it can send.
   let logId: string;
+  let claimedAt: Date;
   try {
     const claim = await prisma.triageLog.create({
       data: {
@@ -237,9 +245,10 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
         action: "PENDING",
         mode,
       },
-      select: { id: true },
+      select: { id: true, createdAt: true },
     });
     logId = claim.id;
+    claimedAt = claim.createdAt;
   } catch (error) {
     if (isUniqueViolation(error)) return null;
     throw error;
@@ -265,8 +274,12 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
 
   // Tell the owner. A person's messages are stacked into one notice, and the
   // phone rings at most once per person inside the cooldown (see notify.ts);
-  // `ring` is for the notice that must not arrive silently.
-  const tellOwner = (reason: string, ring = false) =>
+  // `ring` is for the notice that must not arrive silently. `draft` is left
+  // out to keep whatever draft is already waiting under the notice.
+  const tellOwner = (
+    reason: string,
+    options: { ring?: boolean; draft?: NoticeDraft | null } = {}
+  ) =>
     notifyOwner(
       {
         instagramAccountId: account.instagramId,
@@ -274,11 +287,91 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
         senderName,
         messageText: shownText,
         reason,
+        ...(options.draft === undefined ? {} : { draft: options.draft }),
       },
-      { ring }
+      { ring: options.ring ?? false }
     );
 
   const notify = (reason: string) => tellOwner(reason);
+
+  // Forget drafts that no longer fit. Housekeeping: a failure here must not
+  // keep the message itself from being handled.
+  const dropDrafts = (options: { olderThan?: Date } = {}) =>
+    dropPendingDrafts({ accountId: account.id, senderId }, options).catch((error) => {
+      console.error("[Triage] Could not drop an old draft:", error);
+      return 0;
+    });
+
+  // The pages this sender was sent, looked up at most once per message.
+  let pagesLookup: ReturnType<typeof findPagesForSender> | null = null;
+  const loadPages = () => (pagesLookup ??= findPagesForSender(account.id, priorLogs));
+
+  // A reply for the owner to approve, written only where the owner can act on
+  // it: full mode, with a model. Failing to write one is never an error — the
+  // notice goes out without it.
+  const writeDraft = async (reason: string): Promise<string | null> => {
+    if (mode !== "full" || !isAiConfigured()) return null;
+    try {
+      const [pages, earlier] = await Promise.all([
+        loadPages(),
+        prisma.triageLog.findMany({
+          where: {
+            instagramAccountId: account.id,
+            senderId,
+            createdAt: { gte: new Date(Date.now() - DAY_MS) },
+            id: { not: logId },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 6,
+          select: { messageText: true, action: true, replyText: true },
+        }),
+      ]);
+      return await draftReply({
+        message: messageText,
+        reason,
+        pages: pages.map((p) => ({ title: p.title, url: p.url, content: p.content })),
+        // What this app saw of the conversation today, oldest first: their
+        // messages, and what actually went out in reply.
+        history: earlier.reverse().flatMap((row) => [
+          { from: "them" as const, text: row.messageText },
+          ...(row.replyText && (row.action === "REPLIED" || row.action === "SENT_BY_OWNER")
+            ? [{ from: "us" as const, text: row.replyText }]
+            : []),
+        ]),
+      });
+    } catch (error) {
+      console.error("[Triage] Could not prepare a draft:", error);
+      return null;
+    }
+  };
+
+  // Hand the message to the owner: nothing is sent to the person. With a
+  // draft, the row is written before the notice goes out, so the buttons
+  // under the notice always find the draft they are for.
+  const escalate = async (
+    category: string,
+    reason: string,
+    options: { draft?: boolean } = {}
+  ): Promise<TriageOutcome> => {
+    const text = options.draft === false ? null : await writeDraft(reason);
+    if (!text) {
+      await notify(reason);
+      return record(category, "ESCALATED", { reason });
+    }
+    // One draft per person: this message's draft replaces those of earlier ones.
+    await dropDrafts({ olderThan: claimedAt });
+    let outcome: TriageOutcome;
+    try {
+      outcome = await record(category, "ESCALATED", { reason, replyText: text });
+    } catch (error) {
+      // The draft could not be stored, so its buttons would have nothing to
+      // send. The owner still hears about the message, as a plain notice.
+      await notify(reason);
+      throw error;
+    }
+    await tellOwner(reason, { draft: { logId, text, at: claimedAt.getTime() } });
+    return outcome;
+  };
 
   // An away message or bot menu from the other account. Nobody wrote it, so it
   // gets no reply and no notice — checked before anything else, because it
@@ -302,7 +395,14 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   // under newer DMs.
   if (ownerActive || handedOff) {
     const reason = ownerActive ? REASON.ownerActive : REASON.handedOff;
-    if (!canned) await notify(reason);
+    if (ownerActive) {
+      // The owner is answering by hand, so a draft written before that no
+      // longer fits: it is dropped, and taken off the notice.
+      await dropDrafts();
+      if (!canned) await tellOwner(reason, { draft: null });
+    } else if (!canned) {
+      await notify(reason);
+    }
     return record(canned ?? "other", "SKIPPED_OWNER_ACTIVE", { reason });
   }
 
@@ -378,7 +478,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     if (whenRepeated === "ignore") {
       return record(category, "IGNORED", { reason: reason ?? REASON.repeated });
     }
-    if (whenRepeated === "tell-owner") await notify(reason ?? REASON.repeated);
+    if (whenRepeated === "tell-owner") return escalate(category, reason ?? REASON.repeated);
     return record(category, "ESCALATED", { reason: reason ?? REASON.repeated });
   };
 
@@ -410,7 +510,7 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   // for the same person a minute ago, and from here on the conversation is
   // the owner's.
   const handOff = async (reason: string): Promise<TriageOutcome> => {
-    await tellOwner(reason, true);
+    await tellOwner(reason, { ring: true });
     if (mode !== "dry_run") {
       await markHandoff(account.instagramId, senderId);
       await clearAskedHuman(account.instagramId, senderId);
@@ -446,11 +546,12 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
   // Not one of the fixed cases. The model only runs where its verdict could be
   // used (full) or reviewed (dry_run); in canned mode this goes to the owner.
   let escalationReason: string = REASON.notCanned;
+  let modelFailed = false;
   if (mode === "full" || mode === "dry_run") {
     if (!isAiConfigured()) {
       escalationReason = REASON.aiNotConfigured;
     } else {
-      const pages = await findPagesForSender(account.id, priorLogs);
+      const pages = await loadPages();
       try {
         const verdict = await answerFromPages(
           messageText,
@@ -498,14 +599,15 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
         // The model's error text names the model and status only (see ai.ts).
         escalationReason =
           error instanceof Error ? error.message.slice(0, 200) : REASON.aiFailed;
+        modelFailed = true;
       }
     }
   }
 
   // Collaboration, courses, complaints, anything unclear: no reply goes out,
-  // the owner hears about it.
-  await notify(escalationReason);
-  return record("other", "ESCALATED", { reason: escalationReason });
+  // the owner hears about it — with a draft they can send as it is. A model
+  // that has just failed is not asked again for the draft.
+  return escalate("other", escalationReason, { draft: !modelFailed });
 }
 
 type PriorLog = {

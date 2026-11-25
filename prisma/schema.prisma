@@ -413,6 +413,8 @@ model TriageLog {
   /// no_problem | thanks | ack | page_question | other | not_eligible
   category           String
   /// REPLIED | DRY_RUN | ESCALATED | IGNORED | SKIPPED_OWNER_ACTIVE | SKIPPED_CAP | FAILED
+  /// | SENT_BY_OWNER (a draft the owner sent from the notice). An ESCALATED row
+  /// with a replyText holds a draft that has not been sent.
   action             String
   /// The triage mode in effect when the message was handled.
   mode               String

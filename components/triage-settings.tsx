@@ -41,6 +41,8 @@ interface TriageData {
     ai: boolean;
     notify: boolean;
     notifyCheck?: "ok" | "failed" | "pending" | "unchecked" | "unconfigured";
+    /** Unset on a worker older than the buttons under a notice. */
+    replyButtons?: boolean;
     checkedAt: string;
   } | null;
 }
@@ -60,7 +62,7 @@ const MODES: { value: TriageMode; label: string; hint: string }[] = [
   {
     value: "full",
     label: "全開",
-    hint: "固定回覆，再加上照留言連結頁的步驟回答問題。合作、課程和答不出來的通知你。",
+    hint: "固定回覆，再加上照留言連結頁的步驟回答問題。合作、課程和答不出來的通知你，並附上草稿：你在 Telegram 按「送出」才會發。",
   },
 ];
 
@@ -69,6 +71,7 @@ const ACTIONS: Record<string, { label: string; tone: "ok" | "warn" | "muted" | "
   REPLIED: { label: "已自動回", tone: "ok" },
   DRY_RUN: { label: "試跑：會這樣回", tone: "muted" },
   ESCALATED: { label: "轉給你", tone: "warn" },
+  SENT_BY_OWNER: { label: "你按送出回的", tone: "ok" },
   IGNORED: { label: "不用回", tone: "muted" },
   SKIPPED_OWNER_ACTIVE: { label: "你在回，沒插嘴", tone: "muted" },
   SKIPPED_CAP: { label: "超過每日上限", tone: "muted" },
@@ -211,6 +214,11 @@ export function TriageSettings() {
         if (on && !data.worker) {
           warnings.push("讀不到 worker 的狀態，可能沒在跑，或還是舊版本。");
         }
+        if (account.mode === "full" && data.worker?.notify && data.worker.replyButtons === false) {
+          warnings.push(
+            "Telegram 通知下面的按鈕現在沒有接上，按了不會有反應。worker 剛重新啟動的話等一兩分鐘就好；一直這樣，可能是這個 bot 被別的程式佔用了。"
+          );
+        }
 
         return (
           <div key={account.id} className="space-y-4">
@@ -255,6 +263,14 @@ export function TriageSettings() {
               <p className="text-sm text-foreground">通知你的管道</p>
               <NotifyPill worker={data.worker} />
             </div>
+            {data.worker?.notify && data.worker.replyButtons !== undefined && (
+              <div className="flex items-center justify-between gap-3 border-b border-border py-3">
+                <p className="text-sm text-foreground">通知下面的「送出」按鈕</p>
+                <Pill tone={data.worker.replyButtons ? "ok" : "warn"}>
+                  {data.worker.replyButtons ? "可以用" : "還沒接上"}
+                </Pill>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-3 border-b border-border py-3">
               <p className="text-sm text-foreground">AI 可以參考的頁面</p>
               <span className="text-sm text-muted">{account.pageCount} 頁</span>
@@ -325,8 +341,11 @@ export function TriageSettings() {
                           {entry.messageText}
                         </p>
                         {entry.replyText && (
-                          <p className="mt-1 break-words text-sm text-muted">
-                            ↳ {entry.replyText}
+                          <p className="mt-1 whitespace-pre-line break-words text-sm text-muted">
+                            {/* On a row handed to the owner, the text is a draft
+                                that has not been sent. */}
+                            {entry.action === "ESCALATED" ? "草稿（還沒發）：" : "↳ "}
+                            {entry.replyText}
                           </p>
                         )}
                         {entry.reason && (

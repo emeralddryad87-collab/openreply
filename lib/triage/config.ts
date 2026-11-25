@@ -24,7 +24,8 @@ export function parseTriageMode(value: unknown): TriageMode {
 export const CANNED_REPLIES = {
   // "no questions" / "all clear" / "got it"
   no_problem: "好的哦，如果有任何問題都歡迎來問我~",
-  thanks: "不用客氣~",
+  // The owner's wording (11-25): always followed by the invitation to ask.
+  thanks: "不用客氣~ 有問題都可以問我",
   // "I followed you", typed instead of tapping the button that sends the link.
   followed: "追蹤後請按上一則訊息的按鈕，就會收到連結～",
   // "I do not know how to use it" / "it is hard", with no word about which part.
@@ -86,6 +87,21 @@ export const NOTICE_THREAD_SECONDS = 24 * 60 * 60;
 
 /** How many of a person's latest messages one notice shows. */
 export const NOTICE_MAX_LINES = 10;
+
+/** A draft reply offered to the owner is at most this long: a few sentences. */
+export const DRAFT_CHAR_LIMIT = 400;
+
+/**
+ * Instagram accepts a reply for 24 hours after the person's message. A draft
+ * older than that can no longer be sent from the notice.
+ */
+export const DRAFT_SEND_WINDOW_SECONDS = 24 * 60 * 60;
+
+/** Instagram's limit on one text message. */
+export const DM_CHAR_LIMIT = 1000;
+
+/** How long "reply to this with your own wording" stays answerable. */
+export const EDIT_PROMPT_SECONDS = 24 * 60 * 60;
 
 /** The clock the times in a notice are written in. */
 export function getNoticeTimeZone(): string {

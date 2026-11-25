@@ -2,6 +2,7 @@ import { getRedisConnection } from "@/lib/queue/client";
 import {
   ASKED_HUMAN_SECONDS,
   BOT_ACTIVITY_SECONDS,
+  EDIT_PROMPT_SECONDS,
   HANDOFF_QUIET_SECONDS,
   NOTICE_THREAD_SECONDS,
   NOTIFY_COOLDOWN_SECONDS,
@@ -137,9 +138,22 @@ const noticeKey = (accountId: string, userId: string) =>
   `triage:notice:${accountId}:${userId}`;
 
 export interface NoticeLine {
-  /** When the sender's message arrived, in ms. */
+  /** When the sender's message arrived (or the owner's reply went out), in ms. */
   at: number;
   text: string;
+  /**
+   * Unset for a message from the sender. "out" is a reply the owner sent from
+   * the notice; "failed" is one Instagram did not accept.
+   */
+  kind?: "out" | "failed";
+}
+
+/** A reply written for the owner to approve: which log row holds it, and its text. */
+export interface NoticeDraft {
+  logId: string;
+  text: string;
+  /** When the message it answers arrived, in ms: the newest draft is the one shown. */
+  at: number;
 }
 
 /**
@@ -151,6 +165,10 @@ export interface NoticeThread {
   startedAt: number;
   pingedAt: number;
   lines: NoticeLine[];
+  /** Kept so the notice can be redrawn later without looking the person up. */
+  senderName?: string | null;
+  /** The draft waiting for the owner's decision, if there is one. */
+  draft?: NoticeDraft | null;
 }
 
 export async function getNoticeThread(
@@ -187,6 +205,70 @@ export async function saveNoticeThread(
   );
 }
 
+const editPromptKey = (chatId: string, messageId: number) =>
+  `triage:tg:prompt:${chatId}:${messageId}`;
+
+/**
+ * "Reply to this message with your own wording": the message the owner was
+ * asked to reply to, and which draft their reply replaces.
+ */
+export interface EditPrompt {
+  logId: string;
+  /** The notice whose button was pressed, so its buttons can be cleared. */
+  noticeMessageId: number | null;
+}
+
+export async function saveEditPrompt(
+  chatId: string,
+  promptMessageId: number,
+  prompt: EditPrompt
+): Promise<void> {
+  await getRedisConnection().set(
+    editPromptKey(chatId, promptMessageId),
+    JSON.stringify(prompt),
+    "EX",
+    EDIT_PROMPT_SECONDS
+  );
+}
+
+export async function getEditPrompt(
+  chatId: string,
+  promptMessageId: number
+): Promise<EditPrompt | null> {
+  const raw = await getRedisConnection().get(editPromptKey(chatId, promptMessageId));
+  if (!raw) return null;
+  try {
+    const prompt = JSON.parse(raw) as EditPrompt;
+    return typeof prompt.logId === "string" && prompt.logId ? prompt : null;
+  } catch {
+    return null;
+  }
+}
+
+const POLLER_KEY = "triage:tg:poller";
+
+/**
+ * Only one process may read the bot's updates: Telegram hands each update to
+ * a single reader, and two readers cut each other off. True means this process
+ * holds (or just renewed) the right; false means another one does.
+ */
+export async function holdUpdatesPoller(
+  instanceId: string,
+  ttlSeconds: number
+): Promise<boolean> {
+  const redis = getRedisConnection();
+  if ((await redis.set(POLLER_KEY, instanceId, "EX", ttlSeconds, "NX")) === "OK") return true;
+  if ((await redis.get(POLLER_KEY)) !== instanceId) return false;
+  await redis.set(POLLER_KEY, instanceId, "EX", ttlSeconds);
+  return true;
+}
+
+/** Give the right up at shutdown, so the next process need not wait it out. */
+export async function releaseUpdatesPoller(instanceId: string): Promise<void> {
+  const redis = getRedisConnection();
+  if ((await redis.get(POLLER_KEY)) === instanceId) await redis.del(POLLER_KEY);
+}
+
 /**
  * Claim the right to notify the owner about this person. False means a notice
  * already went out inside the cooldown, so this one should be skipped. Used
@@ -217,6 +299,11 @@ export interface WorkerCapabilities {
   notify: boolean;
   /** Whether the notification channel was actually proven to deliver. */
   notifyCheck?: NotifyCheck;
+  /**
+   * Whether this worker is hearing the buttons under a notice. Unset on a
+   * worker older than the buttons.
+   */
+  replyButtons?: boolean;
   checkedAt: string;
 }
 

@@ -11,6 +11,7 @@ import {
   verifyWebhookSignature,
 } from "@/lib/meta/webhook";
 import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
+import { dropPendingDrafts } from "@/lib/triage/draft-store";
 import { getTriageModeFor } from "@/lib/triage/settings";
 import { recordEcho } from "@/lib/triage/state";
 import { Prisma } from "@/app/generated/prisma/client";
@@ -151,7 +152,14 @@ export async function POST(request: NextRequest) {
     )) {
       try {
         if ((await getTriageModeFor(event.instagramAccountId)) === "off") continue;
-        await recordEcho(event.instagramAccountId, event.userId);
+        // The owner answered this person by hand: a draft that was waiting
+        // for their decision is answered too, and must not be sent after it.
+        if (await recordEcho(event.instagramAccountId, event.userId)) {
+          await dropPendingDrafts({
+            instagramId: event.instagramAccountId,
+            senderId: event.userId,
+          });
+        }
       } catch (error) {
         console.error("[Triage] Could not record echo:", error);
       }

@@ -5,9 +5,12 @@ import { isAiConfigured } from "@/lib/triage/ai";
 import { isNotifyConfigured } from "@/lib/triage/config";
 import { checkNotifyChannel } from "@/lib/triage/notify-check";
 import { recordWorkerCapabilities } from "@/lib/triage/state";
+import { replyButtonsReady, startTelegramUpdates } from "@/lib/triage/telegram-updates";
 import os from "node:os";
 
 const worker = createDMWorker();
+// The buttons under a "needs you" notice: the owner's taps arrive here.
+const ownerActions = startTelegramUpdates();
 const startedAt = new Date().toISOString();
 const HEARTBEAT_INTERVAL_MS = 30_000;
 // Polling safety net for comments that webhooks miss. Runs in the worker because
@@ -39,6 +42,7 @@ async function heartbeat() {
       ai: isAiConfigured(),
       notify: isNotifyConfigured(),
       notifyCheck: await checkNotifyChannel(),
+      replyButtons: replyButtonsReady(),
     });
   } catch (error) {
     const name = error instanceof Error ? error.name : "Error";
@@ -66,6 +70,7 @@ async function shutdown(signal: string) {
   console.log(`[DM Worker] ${signal} received, closing worker`);
   clearInterval(heartbeatTimer);
   clearInterval(pollTimer);
+  await ownerActions.stop();
   await worker.close();
   process.exit(0);
 }

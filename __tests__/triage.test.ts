@@ -7,10 +7,12 @@ const {
   mockNotifyOwner,
   mockAnswerFromPages,
   mockIsAiConfigured,
+  mockDraftReply,
+  mockDropPendingDrafts,
 } = vi.hoisted(() => ({
   mockPrisma: {
     instagramAccount: { findUnique: vi.fn() },
-    triageLog: { create: vi.fn(), update: vi.fn(), count: vi.fn() },
+    triageLog: { create: vi.fn(), update: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     dmLog: { findMany: vi.fn() },
     triagePage: { findMany: vi.fn() },
   },
@@ -27,6 +29,8 @@ const {
   mockNotifyOwner: vi.fn(),
   mockAnswerFromPages: vi.fn(),
   mockIsAiConfigured: vi.fn(),
+  mockDraftReply: vi.fn(),
+  mockDropPendingDrafts: vi.fn(),
 }));
 
 vi.mock("@/lib/db/client", () => ({ prisma: mockPrisma }));
@@ -38,11 +42,13 @@ vi.mock("@/lib/triage/ai", () => ({
   answerFromPages: mockAnswerFromPages,
   isAiConfigured: mockIsAiConfigured,
 }));
+vi.mock("@/lib/triage/draft", () => ({ draftReply: mockDraftReply }));
+vi.mock("@/lib/triage/draft-store", () => ({ dropPendingDrafts: mockDropPendingDrafts }));
 
 import { runTriage } from "@/lib/triage";
 
 const SIGN_OFF = "好的哦，如果有任何問題都歡迎來問我~";
-const THANKS = "不用客氣~";
+const THANKS = "不用客氣~ 有問題都可以問我";
 const DISCLOSURE = "是的，這是 AI 自動回覆哦～你是想找本人嗎？";
 const HANDOFF = "好的，已經幫你轉給本人了～";
 
@@ -70,6 +76,10 @@ const PRIOR_LOG = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** When the message under test was claimed. */
+const CLAIMED_AT = new Date("2026-11-25T03:00:00Z");
+const DRAFT = "可以呀～你是想合作哪一種形式呢？";
 
 /** The account row as triage reads it, with the given stored mode (null = no setting row). */
 function setMode(mode: string | null) {
@@ -115,8 +125,13 @@ describe("runTriage", () => {
     vi.clearAllMocks();
     setMode("full");
     alreadySent();
-    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1" });
+    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1", createdAt: CLAIMED_AT });
     mockPrisma.triageLog.update.mockResolvedValue({});
+    mockPrisma.triageLog.findMany.mockResolvedValue([]);
+    // No draft unless a test asks for one, which is also what a model that
+    // declines to write one looks like.
+    mockDraftReply.mockResolvedValue(null);
+    mockDropPendingDrafts.mockResolvedValue(0);
     mockPrisma.dmLog.findMany.mockResolvedValue([PRIOR_LOG]);
     mockPrisma.triagePage.findMany.mockResolvedValue([
       {
@@ -632,6 +647,232 @@ describe("runTriage", () => {
       expect(outcome?.action).toBe("ESCALATED");
       expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
       expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
+    });
+  });
+
+  describe("a draft for the owner to approve", () => {
+    const other = (reason = "合作，要本人回") =>
+      mockAnswerFromPages.mockResolvedValue({ category: "other", answer: null, reason });
+    const order = (mock: { mock: { invocationCallOrder: number[] } }) =>
+      mock.mock.invocationCallOrder[0];
+
+    beforeEach(() => {
+      other();
+      mockDraftReply.mockResolvedValue(DRAFT);
+    });
+
+    it("hands the message over with a draft, and sends nothing itself", async () => {
+      const outcome = await send("想找你合作");
+
+      expect(outcome).toEqual({ category: "other", action: "ESCALATED", replyText: DRAFT });
+      expect(sent()).toEqual([]);
+      expect(mockState.markBotActivity).not.toHaveBeenCalled();
+      expect(logged()).toMatchObject({
+        category: "other",
+        action: "ESCALATED",
+        replyText: DRAFT,
+        reason: "合作，要本人回",
+      });
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0]).toEqual([
+        {
+          instagramAccountId: "ig_1",
+          senderId: "user_1",
+          senderName: "fan",
+          messageText: "想找你合作",
+          reason: "合作，要本人回",
+          draft: { logId: "log_1", text: DRAFT, at: CLAIMED_AT.getTime() },
+        },
+        { ring: false },
+      ]);
+    });
+
+    it("writes the draft onto the row before the notice goes out, so its buttons always find it", async () => {
+      await send("想找你合作");
+      expect(order(mockPrisma.triageLog.update)).toBeLessThan(order(mockNotifyOwner));
+    });
+
+    it("gives the writer the message, why it was handed over, the page and its link", async () => {
+      await send("沒收到連結");
+      expect(mockDraftReply).toHaveBeenCalledTimes(1);
+      expect(mockDraftReply.mock.calls[0][0]).toMatchObject({
+        message: "沒收到連結",
+        reason: "合作，要本人回",
+        pages: [{ title: "三個音效外掛", url: "https://example.com/page", content: "安裝步驟…" }],
+        history: [],
+      });
+    });
+
+    it("gives the writer today's conversation, oldest first, with only what really went out", async () => {
+      // Newest first, as the query returns them.
+      mockPrisma.triageLog.findMany.mockResolvedValue([
+        { messageText: "多少錢", action: "ESCALATED", replyText: "一份沒送出的草稿" },
+        { messageText: "有課嗎", action: "SENT_BY_OWNER", replyText: "有的～你想學哪方面？" },
+        { messageText: "謝謝", action: "REPLIED", replyText: THANKS },
+        { messageText: "在嗎", action: "SKIPPED_CAP", replyText: "沒發出去的" },
+      ]);
+      await send("想找你合作");
+
+      expect(mockDraftReply.mock.calls[0][0].history).toEqual([
+        { from: "them", text: "在嗎" },
+        { from: "them", text: "謝謝" },
+        { from: "us", text: THANKS },
+        { from: "them", text: "有課嗎" },
+        { from: "us", text: "有的～你想學哪方面？" },
+        { from: "them", text: "多少錢" },
+      ]);
+      const { where } = mockPrisma.triageLog.findMany.mock.calls[0][0];
+      expect(where).toMatchObject({
+        instagramAccountId: "acct_row",
+        senderId: "user_1",
+        id: { not: "log_1" },
+      });
+    });
+
+    it("replaces the drafts of this person's earlier messages, and only earlier ones", async () => {
+      await send("想找你合作");
+      expect(mockDropPendingDrafts).toHaveBeenCalledTimes(1);
+      expect(mockDropPendingDrafts).toHaveBeenCalledWith(
+        { accountId: "acct_row", senderId: "user_1" },
+        { olderThan: CLAIMED_AT }
+      );
+      expect(order(mockDropPendingDrafts)).toBeLessThan(order(mockPrisma.triageLog.update));
+    });
+
+    it("still hands the message over when an old draft cannot be dropped", async () => {
+      mockDropPendingDrafts.mockRejectedValue(new Error("db blip"));
+      const outcome = await send("想找你合作");
+      expect(outcome?.action).toBe("ESCALATED");
+      expect(mockNotifyOwner.mock.calls[0][0].draft).toMatchObject({ text: DRAFT });
+    });
+
+    it("still tells the owner, plainly, when the draft cannot be stored", async () => {
+      mockPrisma.triageLog.update.mockRejectedValue(new Error("db blip"));
+      await expect(send("想找你合作")).resolves.toBeNull();
+
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      // No buttons for a draft that is not there to be sent.
+      expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+    });
+
+    it("sends the notice without a draft when there is none to offer", async () => {
+      mockDraftReply.mockResolvedValue(null);
+      const outcome = await send("c");
+
+      expect(outcome).toEqual({ category: "other", action: "ESCALATED", replyText: null });
+      expect(logged().replyText).toBeNull();
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      // No word about a draft: one already waiting under the notice stays.
+      expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+      expect(mockDropPendingDrafts).not.toHaveBeenCalled();
+    });
+
+    it("still tells the owner when preparing the draft blows up", async () => {
+      mockPrisma.triageLog.findMany.mockRejectedValue(new Error("db blip"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const outcome = await send("想找你合作");
+      errorSpy.mockRestore();
+
+      expect(outcome?.action).toBe("ESCALATED");
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+    });
+
+    it("offers one when the sender is still stuck after being asked which step", async () => {
+      alreadySent({ lines: [STUCK] });
+      const outcome = await send("還是看不懂");
+
+      expect(outcome?.action).toBe("ESCALATED");
+      expect(sent()).toEqual([]);
+      expect(mockDraftReply.mock.calls[0][0]).toMatchObject({
+        message: "還是看不懂",
+        reason: "問過哪一步卡住了，對方還是說不會",
+      });
+      expect(mockNotifyOwner.mock.calls[0][0].draft).toMatchObject({ text: DRAFT });
+    });
+
+    describe("is not written", () => {
+      afterEach(() => {
+        expect(mockDraftReply).not.toHaveBeenCalled();
+      });
+
+      it("in a dry run, where nothing may go out", async () => {
+        setMode("dry_run");
+        await send("想找你合作");
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+        expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+      });
+
+      it("in canned mode, which uses no model", async () => {
+        setMode("canned");
+        await send("想找你合作");
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      });
+
+      it("when no model is configured", async () => {
+        mockIsAiConfigured.mockReturnValue(false);
+        await send("想找你合作");
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      });
+
+      it("when the model has just failed on this message", async () => {
+        mockAnswerFromPages.mockRejectedValue(new Error("AI 呼叫失敗（test 回 429）"));
+        const outcome = await send("想找你合作");
+        expect(outcome?.action).toBe("ESCALATED");
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      });
+
+      it("for a picture, which nobody but the owner can look at", async () => {
+        await runTriage({ ...INPUT, messageText: "", attachmentKind: "image" });
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+        expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+      });
+
+      it("when the sender asks for the owner in person: they get the fixed line, the owner a ring", async () => {
+        await send("我要找本人");
+        expect(sent()).toEqual([HANDOFF]);
+        expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+        expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: true });
+      });
+
+      it("while the owner is answering by hand — and the draft from before is dropped and taken off the notice", async () => {
+        mockState.ownerRepliedRecently.mockResolvedValue(true);
+        const outcome = await send("那預算大概多少");
+
+        expect(outcome?.action).toBe("SKIPPED_OWNER_ACTIVE");
+        expect(mockDropPendingDrafts).toHaveBeenCalledWith(
+          { accountId: "acct_row", senderId: "user_1" },
+          {}
+        );
+        expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({ draft: null });
+      });
+
+      it("after the sender asked for the owner — the draft from before is left for the owner to decide", async () => {
+        mockState.handedOffRecently.mockResolvedValue(true);
+        const outcome = await send("那預算大概多少");
+
+        expect(outcome?.action).toBe("SKIPPED_OWNER_ACTIVE");
+        expect(mockDropPendingDrafts).not.toHaveBeenCalled();
+        expect(mockNotifyOwner.mock.calls[0][0]).not.toHaveProperty("draft");
+      });
+    });
+
+    it("drops the earlier draft even for a pleasantry the owner is not told about", async () => {
+      mockState.ownerRepliedRecently.mockResolvedValue(true);
+      await send("謝謝");
+      expect(mockDropPendingDrafts).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("keeps handling the message when the owner is active and the old draft cannot be dropped", async () => {
+      mockState.ownerRepliedRecently.mockResolvedValue(true);
+      mockDropPendingDrafts.mockRejectedValue(new Error("db blip"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const outcome = await send("那預算大概多少");
+      errorSpy.mockRestore();
+      expect(outcome?.action).toBe("SKIPPED_OWNER_ACTIVE");
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
     });
   });
 

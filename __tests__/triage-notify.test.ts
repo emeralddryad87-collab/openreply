@@ -41,7 +41,7 @@ const { fakeRedis } = vi.hoisted(() => {
 vi.mock("@/lib/queue/client", () => ({ getRedisConnection: () => fakeRedis }));
 
 import { isNotifyConfigured } from "@/lib/triage/config";
-import { notifyOwner } from "@/lib/triage/notify";
+import { draftKeyboard, formatNotice, notifyOwner, updateNotice } from "@/lib/triage/notify";
 
 const TOKEN = "123456:SECRET-TOKEN";
 const MINUTE = 60 * 1000;
@@ -306,10 +306,278 @@ describe("notifyOwner", () => {
     });
   });
 
+  describe("a draft under the notice", () => {
+    beforeEach(configureTelegram);
+
+    const DRAFT = "可以呀～你是想合作哪一種形式呢？";
+    const AT = Date.parse("2026-11-21T07:53:00Z");
+    const draft = (logId = "clog0000000000000000000a", text = DRAFT, at = AT) => ({ logId, text, at });
+    const withDraft = (messageText: string, d: ReturnType<typeof draft> | null) => ({
+      ...notice(messageText),
+      draft: d,
+    });
+    const BUTTONS = {
+      inline_keyboard: [
+        [
+          { text: "送出", callback_data: "t:s:clog0000000000000000000a" },
+          { text: "修改", callback_data: "t:e:clog0000000000000000000a" },
+          { text: "不用回", callback_data: "t:x:clog0000000000000000000a" },
+        ],
+      ],
+    };
+
+    it("shows the draft under the message, with its three buttons", async () => {
+      expect(await notifyOwner(withDraft("想找你合作", draft()))).toBe(true);
+      expect(calls()).toEqual([
+        [
+          "sendMessage",
+          {
+            chat_id: "987",
+            text: [
+              "IG 私訊需要你回：fan",
+              "15:53「想找你合作」",
+              `草稿：${DRAFT}`,
+              "https://www.instagram.com/fan/",
+            ].join("\n"),
+            disable_web_page_preview: true,
+            reply_markup: BUTTONS,
+          },
+        ],
+      ]);
+    });
+
+    it("keeps what a button carries within Telegram's 64 bytes", () => {
+      for (const row of draftKeyboard("c".repeat(25)).inline_keyboard) {
+        for (const button of row) {
+          expect(Buffer.byteLength(button.callback_data)).toBeLessThanOrEqual(64);
+        }
+      }
+    });
+
+    it("asks once more before sending: the second keyboard is confirm or cancel", () => {
+      expect(draftKeyboard("clog0000000000000000000a", "confirm")).toEqual({
+        inline_keyboard: [
+          [
+            { text: "✅ 確定送出", callback_data: "t:y:clog0000000000000000000a" },
+            { text: "取消", callback_data: "t:n:clog0000000000000000000a" },
+          ],
+        ],
+      });
+    });
+
+    it("keeps the draft and its buttons when the next message comes without one", async () => {
+      await notifyOwner(withDraft("想找你合作", draft()));
+      vi.advanceTimersByTime(MINUTE);
+      await notifyOwner(notice("［圖片］"));
+
+      const [method, body] = calls()[1];
+      expect(method).toBe("editMessageText");
+      expect(body.reply_markup).toEqual(BUTTONS);
+      expect(body.text).toBe(
+        [
+          "IG 私訊需要你回：fan",
+          "15:53「想找你合作」",
+          "15:54「［圖片］」",
+          `草稿：${DRAFT}`,
+          "https://www.instagram.com/fan/",
+        ].join("\n")
+      );
+    });
+
+    it("shows the draft for the later message once there is one", async () => {
+      await notifyOwner(withDraft("想找你合作", draft()));
+      vi.advanceTimersByTime(MINUTE);
+      await notifyOwner(
+        withDraft("請問合作多少錢", draft("clog0000000000000000000b", "你的預算大概多少呢？", AT + MINUTE))
+      );
+
+      const body = calls()[1][1];
+      expect(body.text).toContain("草稿：你的預算大概多少呢？");
+      expect(body.text).not.toContain(DRAFT);
+      expect(body.reply_markup.inline_keyboard[0][0].callback_data).toBe(
+        "t:s:clog0000000000000000000b"
+      );
+    });
+
+    it("does not let the draft for an earlier message replace a later one that got there first", async () => {
+      await notifyOwner(
+        withDraft("請問合作多少錢", draft("clog0000000000000000000b", "你的預算大概多少呢？", AT + MINUTE))
+      );
+      await notifyOwner(withDraft("想找你合作", draft("clog0000000000000000000a", DRAFT, AT)));
+
+      const body = calls()[1][1];
+      expect(body.text).toContain("草稿：你的預算大概多少呢？");
+      expect(body.reply_markup.inline_keyboard[0][0].callback_data).toBe(
+        "t:s:clog0000000000000000000b"
+      );
+    });
+
+    it("takes the draft and its buttons off when told the owner has answered by hand", async () => {
+      await notifyOwner(withDraft("想找你合作", draft()));
+      vi.advanceTimersByTime(MINUTE);
+      await notifyOwner(withDraft("那預算大概多少", null));
+
+      const body = calls()[1][1];
+      expect(body).not.toHaveProperty("reply_markup");
+      expect(body.text).toBe(
+        [
+          "IG 私訊需要你回：fan",
+          "15:53「想找你合作」",
+          "15:54「那預算大概多少」",
+          "https://www.instagram.com/fan/",
+        ].join("\n")
+      );
+    });
+
+    it("carries the draft and its buttons along when the notice is sent afresh", async () => {
+      await notifyOwner(withDraft("想找你合作", draft()));
+      vi.advanceTimersByTime(45 * MINUTE);
+      await notifyOwner(notice("在嗎"));
+
+      expect(methods()).toEqual(["sendMessage", "sendMessage", "deleteMessage"]);
+      expect(calls()[1][1].reply_markup).toEqual(BUTTONS);
+      expect(calls()[1][1].text).toContain(`草稿：${DRAFT}`);
+    });
+
+    it("sends the plain notice if Telegram will not take it with the draft and buttons", async () => {
+      fetchMock.mockImplementation(async (_url: string, init: { body: string }) =>
+        "reply_markup" in JSON.parse(init.body)
+          ? { ok: false, status: 400 }
+          : { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 300 } }) }
+      );
+      expect(await notifyOwner(withDraft("想找你合作", draft()))).toBe(true);
+
+      expect(methods()).toEqual(["sendMessage", "sendMessage"]);
+      expect(calls()[1][1]).toEqual({
+        chat_id: "987",
+        text: "IG 私訊需要你回：fan\n15:53「想找你合作」\nhttps://www.instagram.com/fan/",
+        disable_web_page_preview: true,
+      });
+      // And it does not go on showing a draft it could not post.
+      telegramAccepts();
+      vi.advanceTimersByTime(MINUTE);
+      await notifyOwner(notice("在嗎"));
+      expect(lastText()).not.toContain("草稿");
+      expect(calls().at(-1)![1]).not.toHaveProperty("reply_markup");
+    });
+
+    it("shows a draft with line breaks exactly as it would be sent", async () => {
+      await notifyOwner(withDraft("沒收到", draft(undefined, "不好意思～\n連結在這裡")));
+      expect(lastText()).toContain("草稿：不好意思～\n連結在這裡\nhttps://www.instagram.com/fan/");
+    });
+
+    describe("after the owner acts on it", () => {
+      const sentReply = (thread: Parameters<Parameters<typeof updateNotice>[2]>[0]) => ({
+        ...thread,
+        draft: null,
+        lines: [...thread.lines, { at: Date.now(), text: DRAFT, kind: "out" as const }],
+      });
+
+      it("redraws the notice with the reply in it and the buttons gone, without ringing", async () => {
+        await notifyOwner(withDraft("想找你合作", draft()));
+        vi.advanceTimersByTime(2 * MINUTE);
+        expect(await updateNotice("ig_1", "user_1", sentReply)).toBe(100);
+
+        expect(methods()).toEqual(["sendMessage", "editMessageText"]);
+        expect(calls()[1][1]).toEqual({
+          chat_id: "987",
+          message_id: 100,
+          text: [
+            "IG 私訊已回：fan",
+            "15:53「想找你合作」",
+            `15:55 ✅ 已回「${DRAFT}」`,
+            "https://www.instagram.com/fan/",
+          ].join("\n"),
+          disable_web_page_preview: true,
+        });
+      });
+
+      it("asks again once the person writes back, stacking under the reply", async () => {
+        await notifyOwner(withDraft("想找你合作", draft()));
+        await updateNotice("ig_1", "user_1", sentReply);
+        vi.advanceTimersByTime(3 * MINUTE);
+        await notifyOwner(notice("想拍一支業配"));
+
+        expect(lastText()).toBe(
+          [
+            "IG 私訊需要你回：fan",
+            "15:53「想找你合作」",
+            `15:53 ✅ 已回「${DRAFT}」`,
+            "15:56「想拍一支業配」",
+            "https://www.instagram.com/fan/",
+          ].join("\n")
+        );
+        expect(calls().at(-1)![1]).not.toHaveProperty("reply_markup");
+      });
+
+      it("has nothing to redraw for a person with no notice", async () => {
+        expect(await updateNotice("ig_1", "nobody", sentReply)).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("says so when Telegram will not take the edit", async () => {
+        await notifyOwner(withDraft("想找你合作", draft()));
+        fetchMock.mockResolvedValue({ ok: false, status: 400 });
+        expect(await updateNotice("ig_1", "user_1", sentReply)).toBeNull();
+      });
+
+      it("does nothing when Telegram is not configured", async () => {
+        await notifyOwner(withDraft("想找你合作", draft()));
+        vi.unstubAllEnvs();
+        fetchMock.mockClear();
+        expect(await updateNotice("ig_1", "user_1", sentReply)).toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("keeps the buttons of a draft that is still waiting", async () => {
+        await notifyOwner(withDraft("想找你合作", draft()));
+        await updateNotice("ig_1", "user_1", (thread) => thread);
+        expect(calls()[1][1].reply_markup).toEqual(BUTTONS);
+      });
+    });
+  });
+
+  describe("formatNotice", () => {
+    const sender = { senderName: "fan", senderId: "user_1" };
+    const at = Date.parse("2026-11-21T07:53:00Z");
+
+    it("marks a reply that did not go out", () => {
+      expect(
+        formatNotice(sender, [
+          { at, text: "想找你合作" },
+          { at: at + MINUTE, text: "可以呀～", kind: "failed" },
+        ])
+      ).toBe(
+        [
+          "IG 私訊需要你回：fan",
+          "15:53「想找你合作」",
+          "15:54 ⚠️ 沒送出去「可以呀～」",
+          "https://www.instagram.com/fan/",
+        ].join("\n")
+      );
+    });
+
+    it("names a person without a username by their id, and gives no link", () => {
+      expect(formatNotice({ senderName: null, senderId: "user_9" }, [{ at, text: "嗨" }])).toBe(
+        "IG 私訊需要你回：用戶 user_9\n15:53「嗨」"
+      );
+    });
+  });
+
   describe("on the generic webhook", () => {
     beforeEach(() => {
       vi.stubEnv("TRIAGE_NOTIFY_URL", "https://hooks.example.com/triage");
       vi.stubEnv("TRIAGE_NOTIFY_SECRET", "s3cret");
+    });
+
+    it("leaves the draft out, since a webhook has no buttons to act on it", async () => {
+      await notifyOwner({
+        ...notice("想找你合作"),
+        draft: { logId: "clog0000000000000000000a", text: "可以呀～", at: 1 },
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).not.toHaveProperty("draft");
+      expect(body.text).not.toContain("草稿");
     });
 
     it("posts the notice with its secret header", async () => {

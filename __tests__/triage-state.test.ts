@@ -46,9 +46,15 @@ vi.mock("@/lib/queue/client", () => ({ getRedisConnection: () => fakeRedis }));
 import {
   claimNotifySlot,
   clearAskedHuman,
+  getEditPrompt,
   getLastOwnerReplyAt,
+  getNoticeThread,
   getWorkerCapabilities,
   handedOffRecently,
+  holdUpdatesPoller,
+  releaseUpdatesPoller,
+  saveEditPrompt,
+  saveNoticeThread,
   markAskedHuman,
   markBotActivity,
   markHandoff,
@@ -157,6 +163,93 @@ describe("handing a conversation to the owner", () => {
   });
 });
 
+describe("a notice and its draft", () => {
+  it("remembers the draft, who the person is, and what the owner sent", async () => {
+    const thread = {
+      messageId: 100,
+      startedAt: Date.now(),
+      pingedAt: Date.now(),
+      lines: [
+        { at: 1, text: "想找你合作" },
+        { at: 2, text: "可以呀～", kind: "out" as const },
+      ],
+      senderName: "fan",
+      draft: { logId: "log_1", text: "你的預算大概多少呢？", at: 3 },
+    };
+    await saveNoticeThread("ig_1", "user_1", thread);
+    expect(await getNoticeThread("ig_1", "user_1")).toEqual(thread);
+  });
+
+  it("still reads a notice saved before drafts existed", async () => {
+    await fakeRedis.set(
+      "triage:notice:ig_1:user_1",
+      JSON.stringify({ messageId: 7, startedAt: 1, pingedAt: 1, lines: [{ at: 1, text: "嗨" }] })
+    );
+    const thread = await getNoticeThread("ig_1", "user_1");
+    expect(thread?.messageId).toBe(7);
+    expect(thread?.draft).toBeUndefined();
+  });
+});
+
+describe("the question that asks for the owner's own wording", () => {
+  it("is found again by the message that asked it, for a day", async () => {
+    await saveEditPrompt("987", 101, { logId: "log_1", noticeMessageId: 100 });
+    expect(await getEditPrompt("987", 101)).toEqual({ logId: "log_1", noticeMessageId: 100 });
+
+    vi.advanceTimersByTime(23 * HOUR);
+    expect(await getEditPrompt("987", 101)).not.toBeNull();
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await getEditPrompt("987", 101)).toBeNull();
+  });
+
+  it("is not found under another message or in another chat", async () => {
+    await saveEditPrompt("987", 101, { logId: "log_1", noticeMessageId: 100 });
+    expect(await getEditPrompt("987", 102)).toBeNull();
+    expect(await getEditPrompt("555", 101)).toBeNull();
+  });
+
+  it("is nothing when what is stored cannot be read", async () => {
+    await fakeRedis.set("triage:tg:prompt:987:101", "{not json");
+    expect(await getEditPrompt("987", 101)).toBeNull();
+    await fakeRedis.set("triage:tg:prompt:987:102", JSON.stringify({ noticeMessageId: 1 }));
+    expect(await getEditPrompt("987", 102)).toBeNull();
+  });
+});
+
+describe("the right to read the bot's updates", () => {
+  it("goes to the first process that asks, and to no other", async () => {
+    expect(await holdUpdatesPoller("worker_a", 90)).toBe(true);
+    expect(await holdUpdatesPoller("worker_b", 90)).toBe(false);
+  });
+
+  it("is renewed by the process that holds it", async () => {
+    await holdUpdatesPoller("worker_a", 90);
+    vi.advanceTimersByTime(60 * 1000);
+    expect(await holdUpdatesPoller("worker_a", 90)).toBe(true);
+    vi.advanceTimersByTime(60 * 1000);
+    // Two minutes after the first claim, but only one after the renewal.
+    expect(await holdUpdatesPoller("worker_b", 90)).toBe(false);
+  });
+
+  it("passes on when the holder stops renewing", async () => {
+    await holdUpdatesPoller("worker_a", 90);
+    vi.advanceTimersByTime(91 * 1000);
+    expect(await holdUpdatesPoller("worker_b", 90)).toBe(true);
+  });
+
+  it("passes on at once when the holder lets go", async () => {
+    await holdUpdatesPoller("worker_a", 90);
+    await releaseUpdatesPoller("worker_a");
+    expect(await holdUpdatesPoller("worker_b", 90)).toBe(true);
+  });
+
+  it("cannot be let go by a process that does not hold it", async () => {
+    await holdUpdatesPoller("worker_a", 90);
+    await releaseUpdatesPoller("worker_b");
+    expect(await holdUpdatesPoller("worker_b", 90)).toBe(false);
+  });
+});
+
 describe("claimNotifySlot", () => {
   it("allows one notice per person inside the cooldown", async () => {
     expect(await claimNotifySlot("ig_1", "user_1")).toBe(true);
@@ -172,6 +265,11 @@ describe("claimNotifySlot", () => {
 });
 
 describe("worker capabilities", () => {
+  it("reports whether the buttons under a notice are being heard", async () => {
+    await recordWorkerCapabilities({ ai: true, notify: true, replyButtons: true });
+    expect((await getWorkerCapabilities())?.replyButtons).toBe(true);
+  });
+
   it("reads back what the worker reported", async () => {
     await recordWorkerCapabilities({ ai: true, notify: false });
     expect(await getWorkerCapabilities()).toEqual({
