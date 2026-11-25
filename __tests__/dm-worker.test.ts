@@ -1355,7 +1355,7 @@ describe("DM Worker — a typed DM is answered after a wait", () => {
     vi.unstubAllEnvs();
   });
 
-  it("claims the message now and comes back to it twenty seconds later", async () => {
+  it("claims the message now and comes back to it five seconds later", async () => {
     const processor = getProcessor();
     await processor(typedDm());
 
@@ -1368,7 +1368,7 @@ describe("DM Worker — a typed DM is answered after a wait", () => {
     expect(mockQueueAdd).toHaveBeenCalledWith(
       "process-triage",
       { instagramAccountId: "ig_456", logId: "log_42" },
-      { delay: 20_000, jobId: "triage_log_42", attempts: 1 }
+      { delay: 5_000, jobId: "triage_log_42", attempts: 1 }
     );
     // Nothing is decided, and so nothing can be sent, before the wait is over.
     expect(mockRunTriage).not.toHaveBeenCalled();
@@ -1383,13 +1383,13 @@ describe("DM Worker — a typed DM is answered after a wait", () => {
     expect(mockQueueAdd.mock.calls[0][2]).toMatchObject({ delay: 45_000 });
   });
 
-  it("falls back to twenty seconds when the setting is not a sensible number", async () => {
+  it("falls back to five seconds when the setting is not a sensible number", async () => {
     for (const value of ["soon", "-5", "9999"]) {
       mockQueueAdd.mockClear();
       vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", value);
       const processor = getProcessor();
       await processor(typedDm());
-      expect(mockQueueAdd.mock.calls[0][2]).toMatchObject({ delay: 20_000 });
+      expect(mockQueueAdd.mock.calls[0][2]).toMatchObject({ delay: 5_000 });
     }
   });
 

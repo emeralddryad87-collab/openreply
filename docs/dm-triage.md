@@ -45,13 +45,16 @@ sends exactly what it sent before.
 ## A short wait, and the conversation so far
 
 A typed message is not answered the instant it arrives. The worker claims it
-and comes back after `TRIAGE_REPLY_DELAY_SECONDS` (default 20; 0 answers at
+and comes back after `TRIAGE_REPLY_DELAY_SECONDS` (default 5; 0 answers at
 once). Messages the same person sends inside that wait are answered together,
 once, by the turn of the last one: the earlier rows are logged as `MERGED`, and
 the model reads all of it as one message, a line each. The other account's
 away message, if one lands in between, is set aside on its own. Pictures are
 not held back (nothing is sent for them, and the owner should hear at once),
-nor are button taps or the first DM after a comment.
+nor are button taps or the first DM after a comment. The wait is also the
+window for answering together: at 5 seconds only messages sent in quick
+succession are merged, and a longer wait merges more at the price of a slower
+reply.
 
 The model is shown the earlier turns of the day: what the person wrote, and
 what actually went out in reply (automatic replies and drafts the owner sent;
@@ -150,7 +153,7 @@ is on, so there is no blind moment right after it is switched on.
      and a fortieth of it. Without an Anthropic key the worker uses Groq as
      before (`GROQ_API_KEY` and `TRIAGE_AI_MODEL`), so removing the key is all
      it takes to go back. The Settings page shows which one is answering.
-   - optional: `TRIAGE_REPLY_DELAY_SECONDS` (default 20)
+   - optional: `TRIAGE_REPLY_DELAY_SECONDS` (default 5)
 4. Switch the account to 試跑 on the Settings page and review before going further.
 
 ## Notices

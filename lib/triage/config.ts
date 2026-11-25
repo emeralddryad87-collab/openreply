@@ -83,16 +83,24 @@ export const INVITE_REPEAT_SECONDS = 10 * 60;
 export const BATCH_WINDOW_SECONDS = 5 * 60;
 
 /**
+ * The owner's choice (11-25): long enough not to read like a machine, short
+ * enough that nobody is left waiting. It began at twenty seconds.
+ */
+export const DEFAULT_REPLY_DELAY_SECONDS = 5;
+
+/**
  * How long to wait before answering a typed message. A reply that lands the
  * instant someone hits send reads like a machine, and people often finish a
- * thought in a second message: waiting lets both be answered together.
+ * thought in a second message: waiting lets both be answered together. The
+ * shorter the wait, the closer together two messages must be to be answered
+ * as one.
  */
 export function getReplyDelaySeconds(): number {
   const raw = env("TRIAGE_REPLY_DELAY_SECONDS");
   // Whole seconds only: "1e9" must not be read as one second.
-  if (!/^\d{1,3}$/.test(raw)) return 20;
+  if (!/^\d{1,3}$/.test(raw)) return DEFAULT_REPLY_DELAY_SECONDS;
   const n = Number.parseInt(raw, 10);
-  return n <= 300 ? n : 20;
+  return n <= 300 ? n : DEFAULT_REPLY_DELAY_SECONDS;
 }
 
 /** After someone asks for the owner, send them nothing more for this long. */

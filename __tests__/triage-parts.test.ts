@@ -919,14 +919,14 @@ describe("how long a typed message waits for its answer", () => {
     vi.unstubAllEnvs();
   });
 
-  it("is twenty seconds unless told otherwise", () => {
+  it("is five seconds unless told otherwise", () => {
     vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", "");
-    expect(getReplyDelaySeconds()).toBe(20);
+    expect(getReplyDelaySeconds()).toBe(5);
   });
 
   it.each([
     ["0", 0],
-    ["5", 5],
+    ["20", 20],
     ["300", 300],
     [" 45 ", 45],
   ])("can be set to %s", (value, seconds) => {
@@ -934,8 +934,8 @@ describe("how long a typed message waits for its answer", () => {
     expect(getReplyDelaySeconds()).toBe(seconds);
   });
 
-  it.each(["-1", "301", "soon", "1e9"])("ignores %s and stays at twenty", (value) => {
+  it.each(["-1", "301", "soon", "1e9"])("ignores %s and stays at five", (value) => {
     vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", value);
-    expect(getReplyDelaySeconds()).toBe(20);
+    expect(getReplyDelaySeconds()).toBe(5);
   });
 });
