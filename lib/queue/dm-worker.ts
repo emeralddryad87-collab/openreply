@@ -5,11 +5,13 @@ import {
   MESSAGE_JOB_NAME,
   POSTBACK_JOB_NAME,
   FOLLOWUP_JOB_NAME,
+  TRIAGE_JOB_NAME,
   type DmQueueJob,
   type ProcessCommentJob,
   type ProcessMessageJob,
   type ProcessPostbackJob,
   type ProcessFollowUpJob,
+  type ProcessTriageJob,
 } from "./client";
 import { prisma } from "@/lib/db/client";
 import {
@@ -27,7 +29,8 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { runTriage } from "@/lib/triage";
+import { claimTriage, resumeTriage, runTriage, type TriageInput } from "@/lib/triage";
+import { getReplyDelaySeconds } from "@/lib/triage/config";
 import { findKeywordCampaign } from "@/lib/triage/keyword-dm";
 import { markBotActivity } from "@/lib/triage/state";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
@@ -690,7 +693,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
  * IGSID (same id as their comment author id), which we DM directly.
  */
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
-  const { instagramAccountId, userId, payload, fallback } = job.data;
+  const { instagramAccountId, userId, payload, fallback, strictFollow } = job.data;
 
   const isFollowCheck = payload.startsWith("followcheck:");
   if (!isFollowCheck && !payload.startsWith("reveal:")) return;
@@ -754,9 +757,14 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   // be bypassable by just reading the DM and waiting. Following, or
   // unverifiable (null), falls through and delivers the link — fail-open so a
   // real follower is never trapped.
+  //
+  // `strictFollow` is the exception: DM triage is re-sending the campaign to
+  // someone who wrote that the link never came. Nobody tapped "I'm following"
+  // there, so an unverifiable status is not good enough — they get the prompt
+  // and its button, and the tap decides as usual.
   if ((isFollowCheck || fallback) && automation.requireFollow) {
     const follows = await getUserFollowStatus(accessToken, userId);
-    if (follows === false) {
+    if (follows === false || (strictFollow && follows !== true)) {
       if (fallback) return;
       const promptText = renderMessageWithoutLink({
         message:
@@ -1230,7 +1238,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   // No campaign keyword matched: let triage decide (a no-op unless it is
   // switched on for this account). It never throws and never retries.
   if (!claimed) {
-    await runTriage({
+    await scheduleTriage({
       instagramAccountId,
       messageId,
       messageText,
@@ -1238,6 +1246,43 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       isStoryReply: job.data.isStoryReply,
     });
   }
+}
+
+/**
+ * Hand a typed DM to triage, to be answered after a short wait.
+ *
+ * The message is claimed now and acted on by a delayed job. The wait is what
+ * the owner asked for — a reply that lands the instant someone hits send
+ * reads like a machine — and it is also what lets two messages sent in a row
+ * be answered as one (see resumeTriage). With the wait set to zero the message
+ * is handled on the spot, as it always was.
+ */
+async function scheduleTriage(input: TriageInput): Promise<void> {
+  const delaySeconds = getReplyDelaySeconds();
+  if (delaySeconds <= 0) {
+    await runTriage(input);
+    return;
+  }
+
+  const claim = await claimTriage(input);
+  if (!claim) return;
+  try {
+    await getDMQueue().add(
+      TRIAGE_JOB_NAME,
+      { instagramAccountId: input.instagramAccountId, logId: claim.logId },
+      // One attempt: triage never retries, so that it can never answer twice.
+      { delay: delaySeconds * 1000, jobId: `triage_${claim.logId}`, attempts: 1 }
+    );
+  } catch (error) {
+    // The wait could not be scheduled. Answering at once beats not answering.
+    console.error("[Triage] Could not schedule a reply, handling it now:", formatError(error));
+    await resumeTriage(claim.logId);
+  }
+}
+
+/** The wait is over: act on a message claimed by scheduleTriage. */
+async function processTriage(job: Job<ProcessTriageJob>): Promise<void> {
+  await resumeTriage(job.data.logId);
 }
 
 /** The Instagram user a comment, button-tap or follow-up job is about. */
@@ -1272,7 +1317,9 @@ async function processJob(job: Job<DmQueueJob>): Promise<void> {
   // nothing (triage hands it to the owner, or stays quiet), so it marks only
   // at the point it sends — otherwise the owner answering that very message
   // would be read as the bot's own reply and triage would not step back.
-  const userId = job.name === MESSAGE_JOB_NAME ? null : jobUserId(job);
+  const decidesForItself =
+    job.name === MESSAGE_JOB_NAME || job.name === TRIAGE_JOB_NAME;
+  const userId = decidesForItself ? null : jobUserId(job);
   if (userId) await markBotActive(job.data.instagramAccountId, userId);
   try {
     return await dispatchJob(job);
@@ -1290,6 +1337,9 @@ async function dispatchJob(job: Job<DmQueueJob>): Promise<void> {
   }
   if (job.name === MESSAGE_JOB_NAME) {
     return processMessage(job as Job<ProcessMessageJob>);
+  }
+  if (job.name === TRIAGE_JOB_NAME) {
+    return processTriage(job as Job<ProcessTriageJob>);
   }
   return processComment(job as Job<ProcessCommentJob>);
 }

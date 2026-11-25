@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { mockAskClaude } = vi.hoisted(() => ({ mockAskClaude: vi.fn() }));
+vi.mock("@/lib/triage/claude", () => ({ askClaude: mockAskClaude }));
+
 import {
+  DRAFT_SCHEMA,
   buildDraftMessages,
   cleanDraft,
   draftReply,
@@ -281,5 +286,117 @@ describe("draftReply", () => {
     configure();
     stubModel("好的，我來幫你寫：可以呀～");
     expect(await draftReply(input())).toBeNull();
+  });
+});
+
+describe("what the draft writer is told", () => {
+  const rules = buildDraftMessages(input())[0].content;
+
+  it("is to answer the question, not to stall", () => {
+    expect(rules).toContain("第一句就回答對方問的事");
+    expect(rules).toContain("不要寫「不太確定」就結束");
+  });
+
+  it("is to ask for a screenshot only when something went wrong", () => {
+    expect(rules).toContain("只有對方說出錯、打不開、做不出來的時候，才請他截圖");
+    expect(rules).toContain("不要請他截圖");
+  });
+
+  it("is to keep it to a sentence or two", () => {
+    expect(rules).toContain("一句話講完，最多兩句");
+  });
+
+  it("is to leave collaboration, prices and courses to the owner entirely", () => {
+    expect(rules).toContain("合作、業配、報價、他的課程和教學服務、怎麼收費：這些他要親自回，draft 填空字串");
+  });
+
+  it("is never to say what tutorials the owner has or has not made: it sees one page of them", () => {
+    expect(rules).toContain("也不要說他「有」或「還沒有」做過某個主題的教學或影片");
+  });
+
+  it("is to pick up a question that was never really answered", () => {
+    expect(rules).toContain("如果對方前面問的問題還沒有被真正回答，草稿要把那個問題答掉");
+  });
+
+  it("includes the owner's standing answers", () => {
+    expect(rules).toContain("【常見問題】");
+    expect(rules).toContain("免費版沒辦法哦，這個要用到 Claude Code，要 Pro 以上才有～");
+  });
+});
+
+describe("draftReply, continued", () => {
+  function stubModel(content: string) {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content } }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    mockAskClaude.mockReset();
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("GROQ_API_KEY", "test-key");
+    vi.stubEnv("TRIAGE_AI_MODEL", "test-model");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("has no draft when the model hands back an empty one", async () => {
+    stubModel('{"draft":""}');
+    expect(await draftReply(input())).toBeNull();
+  });
+
+  it("may hand out the link in the owner's standing answers", async () => {
+    stubModel('{"draft":"照官方這頁裝就可以了哦～ code.claude.com/docs/en/setup"}');
+    expect(await draftReply(input({ message: "Claude Code 去哪裡下載" }))).toBe(
+      "照官方這頁裝就可以了哦～ code.claude.com/docs/en/setup"
+    );
+  });
+
+  it("shows the writer the earlier turns", async () => {
+    const fetchMock = stubModel('{"draft":"免費版沒辦法哦，要 Pro 以上才有～"}');
+    await draftReply(
+      input({
+        message: "欸…尚未嘗試",
+        history: [
+          { from: "them", text: "免費版的也支援嗎" },
+          { from: "us", text: "不太確定呢，方便截圖嗎？" },
+        ],
+      })
+    );
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages[1].content).toContain(
+      "【前面的對話】\n對方：免費版的也支援嗎\n我：不太確定呢，方便截圖嗎？"
+    );
+  });
+
+  it("is written by Claude when an Anthropic key is set, held to the draft's shape", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    const fetchMock = stubModel("{}");
+    mockAskClaude.mockResolvedValue('{"draft":"免費版沒辦法哦，要 Pro 以上才有～"}');
+
+    expect(await draftReply(input({ message: "免費版可以嗎" }))).toBe(
+      "免費版沒辦法哦，要 Pro 以上才有～"
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    const request = mockAskClaude.mock.calls[0][0];
+    expect(request).toMatchObject({ model: "claude-opus-5-5", schema: DRAFT_SCHEMA });
+    const [system, user] = buildDraftMessages(input({ message: "免費版可以嗎" }));
+    expect(request.system).toBe(system.content);
+    expect(request.user).toBe(user.content);
+  });
+
+  it("has no draft, and does not throw, when Claude fails", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    mockAskClaude.mockRejectedValue(new Error("AI 呼叫失敗（Claude 額度不足）"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(draftReply(input())).resolves.toBeNull();
+    errorSpy.mockRestore();
   });
 });

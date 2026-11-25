@@ -410,11 +410,14 @@ model TriageLog {
   senderId           String
   messageId          String
   messageText        String
-  /// no_problem | thanks | ack | page_question | other | not_eligible
+  /// no_problem | thanks | ack | followed | stuck | page_question | missing_link |
+  /// quota | attachment | auto_reply | other | merged | pending (see lib/triage)
   category           String
   /// REPLIED | DRY_RUN | ESCALATED | IGNORED | SKIPPED_OWNER_ACTIVE | SKIPPED_CAP | FAILED
   /// | SENT_BY_OWNER (a draft the owner sent from the notice). An ESCALATED row
-  /// with a replyText holds a draft that has not been sent.
+  /// with a replyText holds a draft that has not been sent. PENDING is a message
+  /// claimed and waiting its turn; MERGED is one answered together with the
+  /// message that followed it.
   action             String
   /// The triage mode in effect when the message was handled.
   mode               String

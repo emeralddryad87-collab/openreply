@@ -5,6 +5,7 @@
  *   "no questions" / "all clear" / "got it"   the sign-off line
  *   "thanks"                                  the thanks line
  *   "I followed you" (已追蹤)                  the tap-the-button line
+ *   "I never got the link" (沒收到)            the link, or the follow button, again
  *   "I don't get it" / "it's hard"            the which-step-are-you-stuck-on line
  *   another account's auto-reply              nothing, and nobody is told
  *   a bare acknowledgement (好的, ok, 👍)      the sign-off line as well
@@ -17,7 +18,13 @@
  * Whatever is not recognised here goes on to the model, or to the owner.
  */
 
-export type CannedKind = "no_problem" | "thanks" | "followed" | "stuck" | "ack";
+export type CannedKind =
+  | "no_problem"
+  | "thanks"
+  | "followed"
+  | "missing_link"
+  | "stuck"
+  | "ack";
 
 // Traditional and simplified forms are both listed: the audience writes both.
 const NO_PROBLEM = [
@@ -114,12 +121,32 @@ const FOLLOWED = [
   "followed", "ifollowed", "ifollowedyou", "alreadyfollowed", "following", "imfollowing",
 ];
 
+// "The link never came" / "there is no button". Said by people who followed but
+// did not tap the button again, and by people who never followed: the answer
+// is the link for the first and the follow button for the second (the caller
+// checks which). Listed whole, so that they match before the bare "no" below.
+const MISSING_LINK = [
+  "沒收到", "沒有收到", "還沒收到", "還沒有收到", "都沒收到", "沒收到連結", "沒有收到連結",
+  "還沒收到連結", "還沒有收到連結", "還是沒收到", "還是沒有收到", "還是收不到",
+  "沒收到鏈接", "沒有收到鏈接", "還沒收到鏈接", "沒收到東西", "沒有收到東西", "沒收到訊息",
+  "沒看到連結", "沒有看到連結", "沒看到鏈接", "沒看到按鈕", "沒有看到按鈕", "沒有按鈕", "沒按鈕",
+  "沒有連結", "沒連結", "沒有鏈接", "找不到連結", "找不到鏈接", "找不到按鈕", "看不到連結",
+  "看不到鏈接", "看不到按鈕", "連結沒有來", "連結沒來", "連結不見了", "收不到", "收不到連結",
+  "没收到", "没有收到", "还没收到", "还没有收到", "都没收到", "没收到链接", "没有收到链接",
+  "还没收到链接", "还没有收到链接", "还是没收到", "还是没有收到", "还是收不到",
+  "没收到东西", "没有收到东西", "没收到消息", "没看到链接", "没有看到链接", "没看到按钮",
+  "没有看到按钮", "没有按钮", "没按钮", "没有链接", "没链接", "找不到链接", "找不到按钮",
+  "看不到链接", "看不到按钮", "链接没有来", "链接没来", "链接不见了", "收不到链接",
+  "didntgetit", "didntgetthelink", "ididntgetit", "ididntgetthelink", "nolink", "nobutton",
+  "notreceived", "didntreceive", "ididntreceiveit", "haventreceived",
+];
+
 // A bare "no" on its own answers "any questions?". Followed by another word it
-// usually negates that word instead — 沒收到 is "I didn't get it", 還沒收到連結 is
-// "the link never came" — and those are exactly the messages a person must
-// see. So after a phrase that ends in a bare "no", only a thank-you (or the end
-// of the message) is allowed. The negations that do have a fixed meaning
-// (沒有很難, 沒看懂) are listed whole above and match first.
+// usually negates that word instead — 沒辦法下載 is "I cannot download it" — and
+// those are exactly the messages a person must see. So after a phrase that
+// ends in a bare "no", only a thank-you (or the end of the message) is
+// allowed. The negations that do have a fixed meaning (沒有很難, 沒看懂, 沒收到)
+// are listed whole above and match first.
 const ENDS_IN_BARE_NO = /(?:沒有|沒|没有|没)$/u;
 
 const THANKS = [
@@ -160,6 +187,7 @@ const TOKENS: { text: string; kind: CannedKind }[] = [
   ...STUCK.map((text) => ({ text, kind: "stuck" as const })),
   ...THANKS.map((text) => ({ text, kind: "thanks" as const })),
   ...FOLLOWED.map((text) => ({ text, kind: "followed" as const })),
+  ...MISSING_LINK.map((text) => ({ text, kind: "missing_link" as const })),
   ...FILLER.map((text) => ({ text, kind: "ack" as const })),
 ]
   .map((t) => ({ ...t, text: normalize(t.text) }))
@@ -219,6 +247,9 @@ export function classifyCanned(text: string): CannedKind | null {
   const kinds = consume(cleaned.replace(PARTICLES, ""), []) ?? consume(cleaned, []);
   if (!kinds || kinds.length === 0) return null;
 
+  // "已追蹤，但沒收到" is someone still waiting for their link: nothing else in
+  // the message matters as much.
+  if (kinds.includes("missing_link")) return "missing_link";
   // "謝謝，但看不懂" is someone who needs help: that comes before any courtesy.
   if (kinds.includes("stuck")) return "stuck";
   // "已追蹤，謝謝" is someone waiting for their link.

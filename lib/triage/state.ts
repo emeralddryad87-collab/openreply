@@ -6,7 +6,9 @@ import {
   HANDOFF_QUIET_SECONDS,
   NOTICE_THREAD_SECONDS,
   NOTIFY_COOLDOWN_SECONDS,
+  OFFER_SECONDS,
   OWNER_QUIET_SECONDS,
+  RESEND_ONCE_SECONDS,
 } from "@/lib/triage/config";
 
 /**
@@ -114,6 +116,53 @@ export async function wasAskedHuman(accountId: string, userId: string): Promise<
 
 export async function clearAskedHuman(accountId: string, userId: string): Promise<void> {
   await getRedisConnection().del(askedHumanKey(accountId, userId));
+}
+
+const offerKey = (accountId: string, userId: string) =>
+  `triage:offer:${accountId}:${userId}`;
+
+/**
+ * The sender was just offered something ("shall I send you the link?"). Their
+ * next short "yes" takes the offer up; `what` says which offer it was.
+ */
+export async function markOffered(
+  accountId: string,
+  userId: string,
+  what: string
+): Promise<void> {
+  await getRedisConnection().set(offerKey(accountId, userId), what, "EX", OFFER_SECONDS);
+}
+
+/** The offer still open for this sender, or null. */
+export async function getOffered(accountId: string, userId: string): Promise<string | null> {
+  return getRedisConnection().get(offerKey(accountId, userId));
+}
+
+export async function clearOffered(accountId: string, userId: string): Promise<void> {
+  await getRedisConnection().del(offerKey(accountId, userId));
+}
+
+const resendKey = (accountId: string, userId: string, automationId: string) =>
+  `triage:resend:${accountId}:${userId}:${automationId}`;
+
+/**
+ * Claim the one automatic re-send of a campaign's link to this person. False
+ * means it was already re-sent today: saying "I never got it" a second time
+ * means the re-send did not work, and that is the owner's to look at.
+ */
+export async function claimResend(
+  accountId: string,
+  userId: string,
+  automationId: string
+): Promise<boolean> {
+  const result = await getRedisConnection().set(
+    resendKey(accountId, userId, automationId),
+    "1",
+    "EX",
+    RESEND_ONCE_SECONDS,
+    "NX"
+  );
+  return result === "OK";
 }
 
 /**
@@ -296,6 +345,8 @@ export async function claimNotifySlot(
  */
 export interface WorkerCapabilities {
   ai: boolean;
+  /** Which model answers, e.g. "Claude（claude-opus-5-5）". Unset on older workers. */
+  aiModel?: string | null;
   notify: boolean;
   /** Whether the notification channel was actually proven to deliver. */
   notifyCheck?: NotifyCheck;

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   mockPrisma,
@@ -113,6 +113,7 @@ vi.mock("@/lib/queue/client", () => ({
   POSTBACK_JOB_NAME: "process-postback",
   FOLLOWUP_JOB_NAME: "process-followup",
   MESSAGE_JOB_NAME: "process-message",
+  TRIAGE_JOB_NAME: "process-triage",
 }));
 
 vi.mock("bullmq", () => {
@@ -128,13 +129,25 @@ vi.mock("bullmq", () => {
   };
 });
 
-const { mockRunTriage, mockMarkBotActivity, mockFindKeywordCampaign } = vi.hoisted(() => ({
+const {
+  mockRunTriage,
+  mockClaimTriage,
+  mockResumeTriage,
+  mockMarkBotActivity,
+  mockFindKeywordCampaign,
+} = vi.hoisted(() => ({
   mockRunTriage: vi.fn(),
+  mockClaimTriage: vi.fn(async () => null as { logId: string } | null),
+  mockResumeTriage: vi.fn(),
   mockMarkBotActivity: vi.fn(),
   mockFindKeywordCampaign: vi.fn(async () => null as { automationId: string; keyword: string } | null),
 }));
 
-vi.mock("@/lib/triage", () => ({ runTriage: mockRunTriage }));
+vi.mock("@/lib/triage", () => ({
+  runTriage: mockRunTriage,
+  claimTriage: mockClaimTriage,
+  resumeTriage: mockResumeTriage,
+}));
 vi.mock("@/lib/triage/keyword-dm", () => ({ findKeywordCampaign: mockFindKeywordCampaign }));
 vi.mock("@/lib/triage/state", () => ({ markBotActivity: mockMarkBotActivity }));
 
@@ -963,7 +976,12 @@ describe("DM Worker — DM keyword trigger", () => {
   }
 
   beforeEach(() => {
+    vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", "0");
     mockPrisma.automation.findMany.mockResolvedValue([dmTriggerAutomation]);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("should reply to a DM whose text matches the campaign keywords", async () => {
@@ -1307,5 +1325,199 @@ describe("DM Worker — DM keyword trigger", () => {
         create: expect.objectContaining({ status: "FAILED" }),
       })
     );
+  });
+});
+
+describe("DM Worker — a typed DM is answered after a wait", () => {
+  function typedDm(data: Record<string, unknown> = {}) {
+    return {
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_abc",
+        messageText: "免費版也可以嗎",
+        senderId: "commenter_999",
+        ...data,
+      },
+      id: "message_job_002",
+      attemptsMade: 0,
+    };
+  }
+
+  beforeEach(() => {
+    // No campaign takes the message, so it is triage's.
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+    mockClaimTriage.mockResolvedValue({ logId: "log_42" });
+    mockQueueAdd.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("claims the message now and comes back to it twenty seconds later", async () => {
+    const processor = getProcessor();
+    await processor(typedDm());
+
+    expect(mockClaimTriage).toHaveBeenCalledWith({
+      instagramAccountId: "ig_456",
+      messageId: "mid_abc",
+      messageText: "免費版也可以嗎",
+      senderId: "commenter_999",
+    });
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      "process-triage",
+      { instagramAccountId: "ig_456", logId: "log_42" },
+      { delay: 20_000, jobId: "triage_log_42", attempts: 1 }
+    );
+    // Nothing is decided, and so nothing can be sent, before the wait is over.
+    expect(mockRunTriage).not.toHaveBeenCalled();
+    expect(mockResumeTriage).not.toHaveBeenCalled();
+  });
+
+  it("waits as long as it is told to", async () => {
+    vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", "45");
+    const processor = getProcessor();
+    await processor(typedDm());
+
+    expect(mockQueueAdd.mock.calls[0][2]).toMatchObject({ delay: 45_000 });
+  });
+
+  it("falls back to twenty seconds when the setting is not a sensible number", async () => {
+    for (const value of ["soon", "-5", "9999"]) {
+      mockQueueAdd.mockClear();
+      vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", value);
+      const processor = getProcessor();
+      await processor(typedDm());
+      expect(mockQueueAdd.mock.calls[0][2]).toMatchObject({ delay: 20_000 });
+    }
+  });
+
+  it("schedules nothing for a message triage does not take", async () => {
+    mockClaimTriage.mockResolvedValue(null);
+    const processor = getProcessor();
+    await processor(typedDm());
+
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockResumeTriage).not.toHaveBeenCalled();
+  });
+
+  it("answers at once when the wait cannot be scheduled", async () => {
+    mockQueueAdd.mockRejectedValue(new Error("redis down"));
+    const processor = getProcessor();
+    await expect(processor(typedDm())).resolves.toBeUndefined();
+
+    expect(mockResumeTriage).toHaveBeenCalledWith("log_42");
+  });
+
+  it("handles the message on the spot when the wait is switched off", async () => {
+    vi.stubEnv("TRIAGE_REPLY_DELAY_SECONDS", "0");
+    const processor = getProcessor();
+    await processor(typedDm());
+
+    expect(mockRunTriage).toHaveBeenCalledTimes(1);
+    expect(mockClaimTriage).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("does not make a picture wait: nothing is sent for it, and the owner should hear now", async () => {
+    const processor = getProcessor();
+    await processor(typedDm({ messageText: "", attachmentKind: "image" }));
+
+    expect(mockRunTriage).toHaveBeenCalledTimes(1);
+    expect(mockClaimTriage).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it("acts on the claimed message when the wait is over", async () => {
+    const processor = getProcessor();
+    await processor({
+      name: "process-triage",
+      data: { instagramAccountId: "ig_456", logId: "log_42" },
+      id: "triage_log_42",
+      attemptsMade: 0,
+    });
+
+    expect(mockResumeTriage).toHaveBeenCalledWith("log_42");
+    // Like the message job, it marks the conversation only if it sends.
+    expect(mockMarkBotActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("DM Worker — a campaign re-sent because the link never came", () => {
+  const gated = {
+    ...mockAutomation,
+    requireFollow: true,
+    followPromptMessage: "追蹤後按下面的按鈕",
+    followPromptButtonLabel: "我已經追蹤了",
+    trackedLinks: [],
+  };
+
+  function resend(data: Record<string, unknown> = {}) {
+    return createMockPostbackJob({
+      instagramAccountId: "ig_456",
+      userId: "commenter_999",
+      payload: "followcheck:auto_789",
+      strictFollow: true,
+      ...data,
+    });
+  }
+
+  beforeEach(() => {
+    mockPrisma.automation.findFirst.mockResolvedValue(gated);
+  });
+
+  it("sends the link to someone who follows", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    const processor = getProcessor();
+    await processor(resend());
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("sends the follow button, not the link, to someone who does not follow", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    const processor = getProcessor();
+    await processor(resend());
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "追蹤後按下面的按鈕",
+      "我已經追蹤了",
+      "followcheck:auto_789"
+    );
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends the follow button when it cannot tell whether they follow", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(null);
+    const processor = getProcessor();
+    await processor(resend());
+
+    expect(mockSendDirectMessageWithButton).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("still gives a real button tap the benefit of the doubt", async () => {
+    // Someone who tapped "I'm following" has claimed to follow: an
+    // unverifiable status must not trap them.
+    mockGetUserFollowStatus.mockResolvedValue(null);
+    const processor = getProcessor();
+    await processor(resend({ strictFollow: undefined }));
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+  });
+
+  it("sends the link straight away when the campaign asks for no follow", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue({ ...gated, requireFollow: false });
+    const processor = getProcessor();
+    await processor(resend());
+
+    expect(mockGetUserFollowStatus).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
   });
 });

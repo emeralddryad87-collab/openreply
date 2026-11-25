@@ -45,7 +45,11 @@ vi.mock("@/lib/queue/client", () => ({ getRedisConnection: () => fakeRedis }));
 
 import {
   claimNotifySlot,
+  claimResend,
   clearAskedHuman,
+  clearOffered,
+  getOffered,
+  markOffered,
   getEditPrompt,
   getLastOwnerReplyAt,
   getNoticeThread,
@@ -289,5 +293,48 @@ describe("worker capabilities", () => {
   it("is null when the stored value is not readable", async () => {
     fakeRedis.store.set("triage:worker:capabilities", { value: "{oops", expiresAt: null });
     expect(await getWorkerCapabilities()).toBeNull();
+  });
+});
+
+describe("an offer waiting for a yes", () => {
+  it("stays open for half a day, per conversation, and says which offer it was", async () => {
+    expect(await getOffered("ig_1", "user_1")).toBeNull();
+    await markOffered("ig_1", "user_1", "quota");
+    expect(await getOffered("ig_1", "user_1")).toBe("quota");
+    expect(await getOffered("ig_1", "user_2")).toBeNull();
+    expect(await getOffered("ig_2", "user_1")).toBeNull();
+    vi.advanceTimersByTime(11 * HOUR);
+    expect(await getOffered("ig_1", "user_1")).toBe("quota");
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await getOffered("ig_1", "user_1")).toBeNull();
+  });
+
+  it("closes as soon as it is answered", async () => {
+    await markOffered("ig_1", "user_1", "quota");
+    await clearOffered("ig_1", "user_1");
+    expect(await getOffered("ig_1", "user_1")).toBeNull();
+  });
+
+  it("is not the same question as 'do you want the owner?'", async () => {
+    await markOffered("ig_1", "user_1", "quota");
+    expect(await wasAskedHuman("ig_1", "user_1")).toBe(false);
+  });
+});
+
+describe("re-sending a link that never came", () => {
+  it("is allowed once a day per person and campaign", async () => {
+    expect(await claimResend("ig_1", "user_1", "auto_1")).toBe(true);
+    expect(await claimResend("ig_1", "user_1", "auto_1")).toBe(false);
+    vi.advanceTimersByTime(23 * HOUR);
+    expect(await claimResend("ig_1", "user_1", "auto_1")).toBe(false);
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await claimResend("ig_1", "user_1", "auto_1")).toBe(true);
+  });
+
+  it("is counted separately for another person, another campaign and another account", async () => {
+    expect(await claimResend("ig_1", "user_1", "auto_1")).toBe(true);
+    expect(await claimResend("ig_1", "user_2", "auto_1")).toBe(true);
+    expect(await claimResend("ig_1", "user_1", "auto_2")).toBe(true);
+    expect(await claimResend("ig_2", "user_1", "auto_1")).toBe(true);
   });
 });

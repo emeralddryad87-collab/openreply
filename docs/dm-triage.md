@@ -5,24 +5,33 @@ Handles the inbound DMs that no campaign keyword claimed.
 | The sender wrote | What happens |
 |---|---|
 | "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | fixed reply: 好的哦，如果有任何問題都歡迎來問我~ |
-| "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ 有問題都可以問我 |
+| "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ 有問題都可以問我 — or just 不用客氣~ when a line that already invited questions went out in the last ten minutes |
 | a campaign keyword, or a plain request for it (PDF, 外掛, 請問外掛呢？) | answered by that campaign itself — follow gate, link button and follow-up — as if they had commented it. Once a day per person; a second ask goes to the owner. "外掛打不開" is not a request and goes to the owner too. |
 | "I followed you" (已追蹤, 追蹤了, …), typed instead of tapping the button | fixed reply: 追蹤後請按上一則訊息的按鈕，就會收到連結～ |
+| "I never got the link", "there is no button" (沒收到, 沒有按鈕, 找不到連結, …) | their latest running campaign is sent again, the way a tap on its button would send it: a confirmed follower gets the link, anyone else gets the follow prompt and its button. Once a day per person and campaign; a second time goes to the owner. |
 | a bare acknowledgement (可以, 好的, ok, 👍) | the same sign-off line: it is nearly always the answer to "does that make sense?" |
 | "not hard", "will try later" (不會, 還好, 等下才試試, 還沒試) | the same sign-off line |
 | "I do not get it", "it is hard" (不知道如何使用, 看不懂, 覺得難), with no word about which part | fixed reply: 請問你是哪一步卡住了呢？可以截圖給我看嘛？ Still stuck after that: the owner is notified. |
 | new to AI tools and asks where to begin | fixed reply: 你可以先想一下你現在目前遇到最麻煩可是又最繁雜的手頭工作… |
 | asks whether it can be done on a phone | fixed reply: 這個要用電腦才能做哦，手機目前沒辦法～ |
+| their Claude quota keeps running out | an offer: 我有做過省額度的教學哦，如果要的話我可以把連結傳給你～ A yes sends the campaign of the quota tutorial (`QUOTA_TUTORIAL_PAGE_KEY`), with the same follow check as above. Not offered to someone who already holds that page, or when its campaign is not running: the owner is notified instead. |
 | a picture, video, voice note or file | no reply; the owner is notified (nobody else can look at it) |
 | the other account's own auto-reply (an away message, a bot menu, "此為系統自動訊息") | nothing: no reply and no notice. It is still written to the log. |
-| a question the page they were sent answers | an answer written from that page's steps, ending with （自動回覆） |
+| a question the page they were sent, or one of the owner's standing answers, settles | an answer in one sentence, written from those only, sent as it is (no "（自動回覆）" tag) |
 | "is this an AI?" / "is this the real person?" | always: 是的，這是 AI 自動回覆哦～你是想找本人嗎？ A yes hands the conversation to the owner; a no gets the sign-off line. |
 | asks for the owner in person | the owner is notified; fixed reply: 好的，已經幫你轉給本人了～ Nothing more is sent to that person for 24 hours. |
 | collaboration, the owner's courses, anything else | no reply; the owner is notified, with a draft reply they can send from the notice (see "Drafts and the buttons under a notice") |
 
 The fixed lines live in `lib/triage/config.ts`. Of what is sent automatically,
-only the page answer is written by the model. A draft for the owner is
+only the answer to a question is written by the model. A draft for the owner is
 model-written too, and goes out only if the owner sends it.
+
+The owner's standing answers live in `lib/triage/facts.ts`: the handful of
+questions people ask most that no page answers (does the free plan work, is Pro
+enough, Windows or Mac, what Claude Code is, …), each with the reply the owner
+approved and a note of where the fact was checked. The model is given them as
+the only thing it may say on those subjects. Plans and prices change; that file
+is the one place to edit when they do.
 
 Every kind is recognised two ways. A phrase list catches the common wordings
 without calling a model, in every mode. In 全開 and 試跑 the model also
@@ -32,6 +41,29 @@ long or asks anything still goes to the owner.
 
 It is off for every account until it is switched on, and while it is off the app
 sends exactly what it sent before.
+
+## A short wait, and the conversation so far
+
+A typed message is not answered the instant it arrives. The worker claims it
+and comes back after `TRIAGE_REPLY_DELAY_SECONDS` (default 20; 0 answers at
+once). Messages the same person sends inside that wait are answered together,
+once, by the turn of the last one: the earlier rows are logged as `MERGED`, and
+the model reads all of it as one message, a line each. The other account's
+away message, if one lands in between, is set aside on its own. Pictures are
+not held back (nothing is sent for them, and the owner should hear at once),
+nor are button taps or the first DM after a comment.
+
+The model is shown the earlier turns of the day: what the person wrote, and
+what actually went out in reply (automatic replies and drafts the owner sent;
+not what the owner typed by hand, which this app never sees). That is what lets
+it read "the 600 one" as the rest of a question about plans, and what keeps a
+sign-off from closing a question nobody answered.
+
+Two rules about sign-off lines follow from the same idea and need no model:
+
+- While a question of the same person is still waiting for the owner (handed
+  over in the last 30 minutes), a "thanks" or "ok" gets no line at all.
+- "Feel free to ask" is not said twice in a row: see the thanks row above.
 
 ## The switch
 
@@ -77,9 +109,17 @@ Roll out in that order. The same panel shows what to check between steps:
   that hits it is simply not sent.
 - The model is shown the follow-up question the campaign asks ("does that make
   sense?"), so a one-word DM can be read as the answer to it.
-- The model may only answer from the page text; "not on the page" always goes to
-  the owner. An answer containing a link, domain or file name that is not on the
-  page is thrown away.
+- The model may answer from the page text, the owner's standing answers and the
+  earlier turns, and may reason from them ("the page lists Mac commands, so a
+  Mac works"). It may not recall: a price, plan, version, command or link that
+  is not written in one of those goes to the owner. An answer containing a
+  link, domain or file name that is on neither the page nor the standing
+  answers is thrown away.
+- A screenshot is asked for only when the person says something went wrong,
+  never in reply to a "can it / does it / how much" question.
+- A link is re-sent once a day per person and campaign, and only a confirmed
+  follower gets it: nobody tapped "I'm following" there, so a follow status
+  Instagram will not confirm gets the follow prompt, not the link.
 - A failed send or model call is logged and never retried.
 
 ### How the owner's replies are told apart from the bot's
@@ -104,7 +144,13 @@ is on, so there is no blind moment right after it is switched on.
    published link, with a `urls.json` mapping file name to link.
 3. Set these on the **worker** only — the web app needs none of them:
    - notices: `TRIAGE_TELEGRAM_BOT_TOKEN` and `TRIAGE_TELEGRAM_CHAT_ID`
-   - page answers: `GROQ_API_KEY` and `TRIAGE_AI_MODEL`
+   - answers and drafts: `ANTHROPIC_API_KEY` (Claude, through Anthropic's own
+     SDK). `TRIAGE_CLAUDE_MODEL` picks the model and defaults to
+     `claude-opus-5-5`; `claude-sonnet-5-5` and `claude-haiku-5-5` cost a half
+     and a fortieth of it. Without an Anthropic key the worker uses Groq as
+     before (`GROQ_API_KEY` and `TRIAGE_AI_MODEL`), so removing the key is all
+     it takes to go back. The Settings page shows which one is answering.
+   - optional: `TRIAGE_REPLY_DELAY_SECONDS` (default 20)
 4. Switch the account to 試跑 on the Settings page and review before going further.
 
 ## Notices

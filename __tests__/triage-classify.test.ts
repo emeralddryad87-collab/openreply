@@ -60,7 +60,6 @@ describe("classifyCanned", () => {
     "這個音效要怎麼裝",
     "我裝不起來",
     "有問題",
-    "沒有收到連結",
     "沒有聲音",
     "可以合作嗎",
     "ok 那我想問",
@@ -80,10 +79,25 @@ describe("classifyCanned", () => {
   // A "no" in front of another word negates that word. These are complaints,
   // the messages that must never get the cheerful sign-off line.
   it.each([
-    "沒收到", "沒有收到", "沒有可以", "目前沒有收到", "没收到", "no ok", "還沒收到", "還沒有收到連結",
-    "沒有連結", "沒有聲音",
+    "沒有可以", "no ok", "沒有聲音", "沒辦法下載", "沒有很順", "還沒有回我",
   ])("leaves %s for a human, because the no negates what follows", (text) => {
     expect(classifyCanned(text)).toBeNull();
+  });
+
+  // "The link never came." Its answer is the link again, or the follow
+  // button, which the caller decides; here it only has to be recognised,
+  // and never mistaken for the bare "no" it starts with.
+  it.each([
+    "沒收到", "沒有收到", "目前沒有收到", "没收到", "還沒收到", "還沒有收到連結", "沒有連結",
+    "沒有收到連結", "沒有按鈕", "找不到連結", "看不到按鈕", "沒收到😭", "沒收到 謝謝", "已追蹤 沒收到",
+    "没有链接", "I didn't get the link", "還是沒收到", "还是没收到",
+  ])("treats %s as the link never having come", (text) => {
+    expect(classifyCanned(text)).toBe("missing_link");
+  });
+
+  it("leaves a question about the link to the model", () => {
+    expect(classifyCanned("沒收到？")).toBeNull();
+    expect(classifyCanned("連結在哪裡？")).toBeNull();
   });
 
   // "I do not get it", with no word about which part.

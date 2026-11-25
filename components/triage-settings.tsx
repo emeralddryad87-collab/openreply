@@ -39,6 +39,8 @@ interface TriageData {
   accounts: TriageAccount[];
   worker: {
     ai: boolean;
+    /** Which model answers, e.g. "Claude（claude-opus-5-5）". Unset on an older worker. */
+    aiModel?: string | null;
     notify: boolean;
     notifyCheck?: "ok" | "failed" | "pending" | "unchecked" | "unconfigured";
     /** Unset on a worker older than the buttons under a notice. */
@@ -57,12 +59,12 @@ const MODES: { value: TriageMode; label: string; hint: string }[] = [
   {
     value: "canned",
     label: "只開固定回覆",
-    hint: "對方說「沒問題」「了解」「可以」「謝謝」「看不懂」會自動回固定句；問是不是 AI 會照實說是。其他的通知你。",
+    hint: "對方說「沒問題」「了解」「可以」「謝謝」「看不懂」會自動回固定句；說沒收到連結會重傳（有追蹤給連結，沒追蹤給按鈕）；問是不是 AI 會照實說是。其他的通知你。",
   },
   {
     value: "full",
     label: "全開",
-    hint: "固定回覆，再加上照留言連結頁的步驟回答問題。合作、課程和答不出來的通知你，並附上草稿：你在 Telegram 按「送出」才會發。",
+    hint: "固定回覆，再加上照留言連結頁和常見問題，用一句話回答問題。合作、課程和答不出來的通知你，並附上草稿：你在 Telegram 按「送出」才會發。",
   },
 ];
 
@@ -73,10 +75,12 @@ const ACTIONS: Record<string, { label: string; tone: "ok" | "warn" | "muted" | "
   ESCALATED: { label: "轉給你", tone: "warn" },
   SENT_BY_OWNER: { label: "你按送出回的", tone: "ok" },
   IGNORED: { label: "不用回", tone: "muted" },
+  MERGED: { label: "跟下一則一起回", tone: "muted" },
   SKIPPED_OWNER_ACTIVE: { label: "你在回，沒插嘴", tone: "muted" },
   SKIPPED_CAP: { label: "超過每日上限", tone: "muted" },
   FAILED: { label: "發送失敗", tone: "error" },
-  PENDING: { label: "處理中", tone: "muted" },
+  // A typed message waits a moment before it is answered.
+  PENDING: { label: "等一下才回", tone: "muted" },
 };
 
 const TONE: Record<string, string> = {
@@ -180,7 +184,7 @@ export function TriageSettings() {
     <section className="panel rounded p-4 sm:p-6">
       <h2 className="text-base font-semibold mb-2">私訊自動分類</h2>
       <p className="text-xs text-muted mb-6">
-        只處理領過你連結的人傳來的私訊。你自己回過的對話，24 小時內它不會插嘴。
+        只處理領過你連結的人傳來的私訊。你自己回過的對話，24 小時內它不會插嘴。對方打字傳來的訊息，會隔一下才回，連傳幾則會一起回一次。
       </p>
 
       {error && (
@@ -256,7 +260,12 @@ export function TriageSettings() {
             ))}
 
             <div className="flex items-center justify-between gap-3 border-b border-border py-3">
-              <p className="text-sm text-foreground">AI 金鑰（回答連結內容用）</p>
+              <div className="min-w-0">
+                <p className="text-sm text-foreground">AI 金鑰（回答連結內容用）</p>
+                {data.worker?.aiModel && (
+                  <p className="mt-0.5 text-xs text-muted">現在用的是 {data.worker.aiModel}</p>
+                )}
+              </div>
               <StatusPill ok={Boolean(data.worker?.ai)} unknown={!data.worker} />
             </div>
             <div className="flex items-center justify-between gap-3 border-b border-border py-3">

@@ -45,6 +45,10 @@ export interface ProcessPostbackJob {
   payload: string;
   mid?: string;
   fallback?: boolean;
+  // Set when nobody tapped anything: DM triage is re-sending a campaign to
+  // someone who wrote that the link never came. The link then goes only to a
+  // confirmed follower; anyone else gets the follow prompt and its button.
+  strictFollow?: boolean;
 }
 
 // Scheduled after the link is delivered, to send the appreciation follow-up.
@@ -72,15 +76,25 @@ export interface ProcessMessageJob {
   attachmentKind?: "image" | "video" | "audio" | "file";
 }
 
+// A typed DM that DM triage has claimed and will answer after a short wait
+// (see getReplyDelaySeconds). Carries only the id of the log row: the message
+// itself is already in the database.
+export interface ProcessTriageJob {
+  instagramAccountId: string;
+  logId: string;
+}
+
 export type DmQueueJob =
   | ProcessCommentJob
   | ProcessPostbackJob
   | ProcessFollowUpJob
-  | ProcessMessageJob;
+  | ProcessMessageJob
+  | ProcessTriageJob;
 
 export const POSTBACK_JOB_NAME = "process-postback";
 export const FOLLOWUP_JOB_NAME = "process-followup";
 export const MESSAGE_JOB_NAME = "process-message";
+export const TRIAGE_JOB_NAME = "process-triage";
 
 let dmQueue: Queue<DmQueueJob> | null = null;
 
