@@ -559,6 +559,48 @@ describe("runTriage", () => {
     });
   });
 
+  describe("the other account's own auto-reply", () => {
+    const AWAY = "謝謝你傳送訊息給我們。我們將盡快與你聯絡。";
+
+    it("gets no reply and no notice", async () => {
+      const outcome = await send(AWAY);
+      expect(outcome).toMatchObject({ category: "auto_reply", action: "IGNORED" });
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      expect(mockAnswerFromPages).not.toHaveBeenCalled();
+    });
+
+    it("gets no notice even in a conversation the owner is handling by hand", async () => {
+      mockState.ownerRepliedRecently.mockResolvedValue(true);
+      const outcome = await send("感謝你送來的訊息，現在不是真人回復");
+      expect(outcome).toMatchObject({ category: "auto_reply", action: "IGNORED" });
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("is still written to the log, so the owner can see what was left out", async () => {
+      await send(AWAY);
+      expect(logged()).toMatchObject({ category: "auto_reply", action: "IGNORED" });
+      expect(claimed().messageText).toBe(AWAY);
+    });
+
+    it("is also left alone when only the model can tell it is automatic", async () => {
+      mockAnswerFromPages.mockResolvedValue({
+        category: "auto_reply",
+        answer: null,
+        reason: "店家的離線訊息",
+      });
+      const outcome = await send("本店今日公休，明日恢復服務，造成不便敬請見諒");
+      expect(outcome).toMatchObject({ category: "auto_reply", action: "IGNORED" });
+      expect(sent()).toEqual([]);
+      expect(mockNotifyOwner).not.toHaveBeenCalled();
+    });
+
+    it("does not swallow a real person asking whether the replies are automatic", async () => {
+      await send("這是自動回覆嗎");
+      expect(sent()).toEqual([DISCLOSURE]);
+    });
+  });
+
   describe("3. collaboration, courses and everything else", () => {
     it.each(["想找你合作 請問價格是多少", "你有開課嗎 想報名你的課程"])(
       "sends nothing for %s and tells the owner",

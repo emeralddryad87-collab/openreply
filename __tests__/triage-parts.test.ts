@@ -69,7 +69,7 @@ describe("parseVerdict", () => {
     }
   );
 
-  it.each(["asks_if_ai", "wants_human"])(
+  it.each(["asks_if_ai", "wants_human", "auto_reply"])(
     "passes on %s, again without any text the model wrote",
     (category) => {
       expect(

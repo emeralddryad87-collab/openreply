@@ -5,6 +5,7 @@ import {
   asksForHuman,
   asksIfAutomated,
   classifyCanned,
+  looksLikeAutoReply,
 } from "@/lib/triage/classify";
 
 describe("classifyCanned", () => {
@@ -175,4 +176,56 @@ describe("answers to 'do you want the owner?'", () => {
       expect(answersNo(text)).toBe(false);
     }
   );
+});
+
+describe("looksLikeAutoReply", () => {
+  // Every one of these arrived for real, from a shop or a studio that had been
+  // sent a campaign DM.
+  it.each([
+    "謝謝你傳送訊息給我們。我們將盡快與你聯絡。",
+    "你好，感謝你的訊息，我們將盡快回覆。",
+    "您好😊 ❣️第一次購買請輸入「結帳」兩個字 並點選「來去逛逛」按鈕完成認證。 這邊沒有處理購物車問題唷~",
+    "Hello 你好，謝謝你的Message ***此乃系統發出的自動訊息，此Inbox不會作出真人回覆及不回覆拍攝價錢詢問***",
+    "👋 嗨你好！歡迎來到某某影像 如果你有拍攝需求，可以先填這份表單， 我們會在 1～2 天內聯繫你",
+    "您好，謝謝您傳訊息給我們 個人工作室人力有限，無法迅速回覆請見諒",
+    "嗨! 如果要預約或是任何問題請加我們的官方line詢問喔！ Hi ! If any inquiry or reservation please add our whatsapp",
+    "親愛的家長您好，感謝您的來訊！ 若想洽詢課程，請您於營業時間直接前往",
+    "感謝你送來的訊息，現在不是真人回復",
+    "Thank you for contacting us. We will get back to you as soon as possible.",
+    "This is an automated message, please do not reply.",
+  ])("recognises %s", (text) => {
+    expect(looksLikeAutoReply(text)).toBe(true);
+  });
+
+  // A person can talk about auto-replies, say "we", or thank you. None of that
+  // makes their message automatic.
+  it.each([
+    "你那個自動回覆超讚",
+    "我發現你開發多那個自動回覆超讚 我可以這樣拿來回覆不好搞定的家長🤣🤣",
+    "那這樣以後我受到的訊息就會是自動化回覆了嗎 我要來判斷一下",
+    "這樣就讓人感受不出來我們在跟誰聊天",
+    "新手做自動化 這種你有在出教學嗎",
+    "了解，我在思考我們公司需不需要，那通常都大概怎麼收費呢～？",
+    "希望有人教會我們",
+    "我明天遊說我們老闆",
+    "我好像裝完了 我請claude一步步帶我排除問題，目前應該是可以了 我再試試看，感謝您",
+    "謝謝你的分享",
+    "謝謝",
+    "想找你合作",
+    "這個音效要怎麼裝",
+    "",
+  ])("does not mistake %s for one", (text) => {
+    expect(looksLikeAutoReply(text)).toBe(false);
+  });
+
+  // Anything that asks something is left for the model, even if it reads like
+  // an away message: a real question must never be dropped by a pattern.
+  it.each([
+    "這是自動回覆嗎",
+    "這是系統自動回覆嗎？還是你本人",
+    "謝謝你傳訊息給我們，請問你們的營業時間是幾點",
+    "你們的營業時間？",
+  ])("leaves %s to the model, because it asks something", (text) => {
+    expect(looksLikeAutoReply(text)).toBe(false);
+  });
 });

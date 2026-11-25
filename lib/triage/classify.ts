@@ -6,6 +6,7 @@
  *   "thanks"                                  the thanks line
  *   "I followed you" (已追蹤)                  the tap-the-button line
  *   "I don't get it" / "it's hard"            the which-step-are-you-stuck-on line
+ *   another account's auto-reply              nothing, and nobody is told
  *   a bare acknowledgement (好的, ok, 👍)      the sign-off line as well
  *   "is this an AI?"                          the disclosure line
  *   "I want the owner"                        hand over to the owner
@@ -343,4 +344,49 @@ export function answersNo(text: string): boolean {
   if (/[?？]/.test(text ?? "")) return false;
   const forms = answerForms(text);
   return forms.some((form) => NO.has(form)) && !forms.some((form) => YES.has(form));
+}
+
+// ─── The other side's own auto-reply ──────────────────────────────────────────
+//
+// Shops and studios that get one of our DMs often answer with an away message
+// or a bot menu: "謝謝你傳送訊息給我們。我們將盡快與你聯絡。" Nobody wrote it, so
+// nobody needs to read it. These patterns come from messages this account
+// really received.
+//
+// A person can mention auto-replies too ("你那個自動回覆超讚"), so a pattern must
+// be something only an automated message says, and anything that asks a
+// question is left for the model: a real question must never be dropped here.
+
+const ASKS = /[?？]|嗎|吗|請問|请问/u;
+
+const AUTO_REPLY = [
+  // Says outright that it is automatic.
+  /(?:此乃|此為|此为|這是|这是|這則是|本訊息為|本訊息是|本消息为|以下為|系統發出的|系统发出的|系統|系统)[^。！!\n]{0,8}自動(?:訊息|消息|回覆|回復|回复|發送|发送)/u,
+  /(?:不會作出|不会作出|不會有|不会有|不是|非)真人(?:在)?回(?:覆|復|复)/u,
+  /(?:現在|目前|现在)不是真人/u,
+  /\bauto(?:matic|mated)?[- ]?(?:reply|response|message)\b/i,
+  /\bthis is an automated\b/i,
+  // Away messages: "we" will get back to "you".
+  /我們(?:將|會|将|会)?(?:盡快|儘快|尽快|稍後|稍后)(?:與你|與您|跟你|跟您|和你|和您|与你|与您)?(?:聯絡|聯繫|回覆|回復|联络|联系|回复)/u,
+  /我們(?:將|會|将|会)?在[^。！!\n]{0,12}內(?:聯絡|聯繫|回覆|回復)/u,
+  /(?:謝謝|感謝|谢谢|感谢)(?:你|您)(?:傳送訊息|傳訊息|发送消息|的來訊|的來信|送來的訊息|發來的訊息|傳來的訊息)/u,
+  /(?:謝謝|感謝)(?:你|您)的(?:訊息|message)[^。！!\n]{0,6}(?:我們|此乃|此為|本)/iu,
+  /無法(?:迅速|即時|立即|馬上)回(?:覆|復)/u,
+  /\bthank(?:s| you) for (?:your message|contacting|reaching out|getting in touch)\b/i,
+  /\bwe(?:'ll| will) get back to you\b/i,
+  // Shop fronts: opening hours, official LINE, bot menus.
+  /(?:營業|服務|上班|客服|营业|服务)時間/u,
+  /(?:請|请)(?:加|加入|洽)(?:入)?(?:我們的|我们的)?官方\s*line/iu,
+  /官方\s*line\s*(?:詢問|洽詢|預約|询问)/iu,
+  /(?:請輸入|请输入)[「『"][^」』"\n]{1,12}[」』"]/u,
+  /點選[「『"][^」』"\n]{1,14}[」』"]按鈕/u,
+  /^[^。！!\n]{0,14}歡迎來到[^。！!\n]{1,24}/u,
+];
+
+/** True when the message is another account's away message or bot menu. */
+export function looksLikeAutoReply(text: string): boolean {
+  const message = (text ?? "").normalize("NFKC");
+  if (message.trim().length < 8) return false;
+  if (ASKS.test(message)) return false;
+  return AUTO_REPLY.some((pattern) => pattern.test(message));
 }

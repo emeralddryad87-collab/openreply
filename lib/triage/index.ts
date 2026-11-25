@@ -8,6 +8,7 @@ import {
   asksForHuman,
   asksIfAutomated,
   classifyCanned,
+  looksLikeAutoReply,
 } from "@/lib/triage/classify";
 import {
   AI_DISCLOSURE_REPLY,
@@ -42,6 +43,7 @@ import {
  *   new to AI, asks where to begin           → the where-to-start line
  *   "can I do this on my phone?"             → the use-a-computer line
  *   a picture or a file                      → no reply; the owner is told
+ *   the other account's own auto-reply       → nothing: no reply, no notice
  *   a question the page answers              → an answer written from that page only
  *   "is this an AI?"                         → "yes", and "do you want the owner?"
  *   wants the owner (or says yes to that)    → the owner is told; one line says so
@@ -118,6 +120,7 @@ const REASON = {
   declinedHuman: "問過要不要找本人，對方說不用",
   attachment: "對方傳了圖片或檔案，AI 看不到內容",
   stillStuck: "問過哪一步卡住了，對方還是說不會",
+  autoReply: "對方帳號的自動回覆，不用處理",
 } as const;
 
 // How a picture or file is shown in the log and in the notice to the owner.
@@ -276,6 +279,14 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
     );
 
   const notify = (reason: string) => tellOwner(reason);
+
+  // An away message or bot menu from the other account. Nobody wrote it, so it
+  // gets no reply and no notice — checked before anything else, because it
+  // often arrives seconds after the owner's own reply, in a conversation that
+  // would otherwise be flagged to them.
+  if (!input.attachmentKind && looksLikeAutoReply(messageText)) {
+    return record("auto_reply", "IGNORED", { reason: REASON.autoReply });
+  }
 
   const canned = input.attachmentKind ? null : classifyCanned(messageText);
 
@@ -476,6 +487,10 @@ async function triage(input: TriageInput): Promise<TriageOutcome | null> {
             break;
           case "wants_human":
             return handOff(verdict.reason || REASON.wantsHuman);
+          case "auto_reply":
+            return record("auto_reply", "IGNORED", {
+              reason: verdict.reason || REASON.autoReply,
+            });
           default:
             escalationReason = verdict.reason;
         }
