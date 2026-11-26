@@ -4,40 +4,65 @@ Handles the inbound DMs that no campaign keyword claimed.
 
 | The sender wrote | What happens |
 |---|---|
-| "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | fixed reply: 好的哦，如果有任何問題都歡迎來問我~ |
-| "thanks" (謝謝, thanks, …) | fixed reply: 不用客氣~ 有問題都可以問我 — or just 不用客氣~ when a line that already invited questions went out in the last ten minutes |
+| "no questions", "all clear", "got it" (沒問題, 都很清楚, 都理解, 了解, …) | a sign-off line. The owner's own: 好的哦，如果有任何問題都歡迎來問我~ |
+| "thanks" (謝謝, thanks, …) | a thanks line. The owner's own: 不用客氣~ 有問題都可以問我 — or just 不用客氣~ when a line that already invited questions went out in the last ten minutes |
 | a campaign keyword, or a plain request for it (PDF, 外掛, 請問外掛呢？) | answered by that campaign itself — follow gate, link button and follow-up — as if they had commented it. Once a day per person; a second ask goes to the owner. "外掛打不開" is not a request and goes to the owner too. |
-| "I followed you" (已追蹤, 追蹤了, …), typed instead of tapping the button | fixed reply: 追蹤後請按上一則訊息的按鈕，就會收到連結～ |
-| "I never got the link", "there is no button" (沒收到, 沒有按鈕, 找不到連結, …) | their latest running campaign is sent again, the way a tap on its button would send it: a confirmed follower gets the link, anyone else gets the follow prompt and its button. Once a day per person and campaign; a second time goes to the owner. |
+| "I never got the link", "there is no button" (沒收到, 沒有按鈕, 找不到連結, …), or "I followed you" typed instead of tapping the button (已追蹤, 您好! 我已追蹤, …) | their latest running campaign is sent again, the way a tap on its button would send it: a confirmed follower gets the link, anyone else gets the follow prompt and its button. Once a day per person and campaign; a second time goes to the owner. The owner is told of every re-send (his rule, 11-26). |
 | a bare acknowledgement (可以, 好的, ok, 👍) | the same sign-off line: it is nearly always the answer to "does that make sense?" |
 | "not hard", "will try later" (不會, 還好, 等下才試試, 還沒試) | the same sign-off line |
-| "I do not get it", "it is hard" (不知道如何使用, 看不懂, 覺得難), with no word about which part | fixed reply: 請問你是哪一步卡住了呢？可以截圖給我看嘛？ Still stuck after that: the owner is notified. |
-| new to AI tools and asks where to begin | fixed reply: 你可以先想一下你現在目前遇到最麻煩可是又最繁雜的手頭工作… |
-| asks whether it can be done on a phone | fixed reply: 這個要用電腦才能做哦，手機目前沒辦法～ |
+| "I do not get it", "it is hard" (不知道如何使用, 看不懂, 覺得難), with no word about which part | asked which step, and for a screenshot. The owner's own: 請問你是哪一步卡住了呢？可以截圖給我看嘛？ Still stuck after that: the owner is notified. |
+| new to AI tools and asks where to begin | told where to start. The owner's own: 你可以先想一下你現在目前遇到最麻煩可是又最繁雜的手頭工作… |
+| asks whether it can be done on a phone | told it takes a computer. The owner's own: 這個要用電腦才能做哦，手機目前沒辦法～ |
 | their Claude quota keeps running out | an offer: 我有做過省額度的教學哦，如果要的話我可以把連結傳給你～ A yes sends the campaign of the quota tutorial (`QUOTA_TUTORIAL_PAGE_KEY`), with the same follow check as above. Not offered to someone who already holds that page, or when its campaign is not running: the owner is notified instead. |
+| wants to learn a topic, asks whether there is a tutorial on one, asks to be taught (可以教我影片剪輯嗎, 可以出一集教 Gemini 嗎) | no reply; the owner is notified every time (his rule, 11-26), with a draft. The draft is given the list of tutorials he can send right now and offers the one that fits (我有做過剪片的教學哦，要的話我把連結傳給你～); it never recommends a tool he has not taught. If he sends that draft as it is, the person's "yes" sends them that tutorial through its campaign, and he is told. |
 | a picture, video, voice note or file | no reply; the owner is notified (nobody else can look at it) |
 | the other account's own auto-reply (an away message, a bot menu, "此為系統自動訊息") | nothing: no reply and no notice. It is still written to the log. |
 | a question the page they were sent, or one of the owner's standing answers, settles | an answer in one sentence, written from those only, sent as it is (no "（自動回覆）" tag) |
-| "is this an AI?" / "is this the real person?" | always: 是的，這是 AI 自動回覆哦～你是想找本人嗎？ A yes hands the conversation to the owner; a no gets the sign-off line. |
-| asks for the owner in person | the owner is notified; fixed reply: 好的，已經幫你轉給本人了～ Nothing more is sent to that person for 24 hours. |
+| "is this an AI?" / "is this the real person?" | always told yes, and asked whether they want the owner. The owner's own: 是的，這是 AI 自動回覆哦～你是想找本人嗎？ A yes hands the conversation to the owner; a no gets the sign-off line. Asked again within ten minutes, the line is not repeated: whatever else that message asks goes to the owner. |
+| asks for the owner in person | the owner is notified, and the person is told so. The owner's own: 好的，已經幫你轉給本人了～ Nothing more is sent to that person for 24 hours. |
 | collaboration, the owner's courses, anything else | no reply; the owner is notified, with a draft reply they can send from the notice (see "Drafts and the buttons under a notice") |
 
-The fixed lines live in `lib/triage/config.ts`. Of what is sent automatically,
-only the answer to a question is written by the model. A draft for the owner is
-model-written too, and goes out only if the owner sends it.
+What each of these lines says is fixed: the owner decided it, and it is written
+in his reply guide with the sentence he would use. Its words are not. In 全開
+(and 試跑) the model writes the line for the message at hand, in his voice and
+in the person's language (`lib/triage/wording.ts`), and the line is checked
+before it is sent: it must still say what the kind requires (a disclosure says
+"AI" and asks about the owner, an offer offers the link) and may not carry an
+address, a number, simplified characters, or a question where none belongs. A
+line that fails, a model that fails, 只開固定回覆, no model at all: the owner's
+own sentence goes out (`lib/triage/config.ts`), and the log says why. A kind of
+line is said to a person once a day, whatever its words were.
 
-The owner's standing answers live in `lib/triage/facts.ts`: the handful of
-questions people ask most that no page answers (does the free plan work, is Pro
-enough, Windows or Mac, what Claude Code is, …), each with the reply the owner
-approved and a note of where the fact was checked. The model is given them as
-the only thing it may say on those subjects. Plans and prices change; that file
-is the one place to edit when they do.
+The answer to a question is model-written too, from the person's page and the
+guide. A draft for the owner is model-written and goes out only if he sends it.
+
+The owner's side of every reply is written down in one file, the reply guide
+(`lib/triage/reply-guide.md`), and the model is given it with every request:
+
+- how the owner talks (how long, how he addresses people, which language,
+  lines he has sent);
+- what each fixed situation calls for, with his own sentence for it;
+- his standing answers: the handful of questions people ask most that no page
+  answers (does the free plan work, is Pro enough, Windows or Mac, what Claude
+  Code is, …), each with the reply he approved. They are the only thing the
+  model may say on those subjects;
+- what only he answers (questions about tutorials, collaborations, prices,
+  his courses).
+
+Each request is sent the sections it needs, not the whole file.
+
+The last section of the file is notes for whoever maintains it (where each fact
+was checked) and is not sent to the model. To change anything, edit the
+Markdown and run `npm run guide`: the worker reads the generated module next to
+it, and a test fails if the two differ. An address written in the guide may be
+sent in a reply, like an address on a page. The repository is public, so
+nothing private belongs in the guide.
 
 Every kind is recognised two ways. A phrase list catches the common wordings
 without calling a model, in every mode. In 全開 and 試跑 the model also
-recognises wordings the list does not know ("目前沒有什麼問題喔，都清楚"); it
-only chooses the kind and never writes those replies, and a sign-off that is
-long or asks anything still goes to the owner.
+recognises wordings the list does not know ("目前沒有什麼問題喔，都清楚"). The
+request that sorts a message only chooses the kind; a sign-off that is long or
+asks anything still goes to the owner.
 
 It is off for every account until it is switched on, and while it is off the app
 sends exactly what it sent before.

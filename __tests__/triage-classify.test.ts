@@ -243,3 +243,26 @@ describe("looksLikeAutoReply", () => {
     expect(looksLikeAutoReply(text)).toBe(false);
   });
 });
+
+describe("a greeting in front of a fixed phrase", () => {
+  it.each([
+    ["您好! 我已追蹤", "followed"],
+    ["你好，已經追蹤了", "followed"],
+    ["hi 已追蹤", "followed"],
+    ["哈囉 謝謝", "thanks"],
+    ["您好 沒收到連結", "missing_link"],
+  ])("reads %s as %s", (text, kind) => {
+    expect(classifyCanned(text)).toBe(kind);
+  });
+
+  it("is not a kind by itself", () => {
+    expect(classifyCanned("你好")).toBeNull();
+    expect(classifyCanned("您好!")).toBeNull();
+    expect(classifyCanned("hi")).toBeNull();
+  });
+
+  it("does not turn a real message into a fixed one", () => {
+    expect(classifyCanned("你好，我想問一下怎麼安裝")).toBeNull();
+    expect(classifyCanned("您好 我已追蹤 但是打不開")).toBeNull();
+  });
+});

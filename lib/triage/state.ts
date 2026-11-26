@@ -343,10 +343,40 @@ export async function claimNotifySlot(
  * in the worker's environment, which the web app cannot see; this is how the
  * Settings page can still tell the owner whether each one is ready.
  */
+/**
+ *   ok            the model's provider accepted the key and knows the model
+ *   bad_key       the key is refused: every call fails until it is replaced
+ *   bad_model     the model name is not one the key can use
+ *   failed        could not be checked just now (network, provider unwell)
+ *   unchecked     a model is set that has no check (Groq)
+ *   unconfigured  no model is set
+ */
+export type AiCheck = "ok" | "bad_key" | "bad_model" | "failed" | "unchecked" | "unconfigured";
+
+const aiAlertKey = (what: string) => `triage:ai:alert:${what}`;
+const AI_ALERT_SECONDS = 6 * 60 * 60;
+
+/**
+ * Claim the one message that tells the owner a model setting is refused.
+ * False means they were told about this very setting in the last six hours.
+ */
+export async function claimAiAlert(what: string): Promise<boolean> {
+  const result = await getRedisConnection().set(
+    aiAlertKey(what),
+    "1",
+    "EX",
+    AI_ALERT_SECONDS,
+    "NX"
+  );
+  return result === "OK";
+}
+
 export interface WorkerCapabilities {
   ai: boolean;
   /** Which model answers, e.g. "Claude（claude-opus-5-5）". Unset on older workers. */
   aiModel?: string | null;
+  /** Whether that model was actually proven to answer. Unset on older workers. */
+  aiCheck?: AiCheck;
   notify: boolean;
   /** Whether the notification channel was actually proven to deliver. */
   notifyCheck?: NotifyCheck;

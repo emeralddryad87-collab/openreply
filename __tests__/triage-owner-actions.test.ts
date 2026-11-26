@@ -12,6 +12,7 @@ type Row = {
   senderId: string;
   action: string;
   replyText: string | null;
+  pageKey?: string | null;
   reason: string | null;
   createdAt: Date;
   instagramAccount: { instagramId: string; accessToken: string | null };
@@ -419,6 +420,48 @@ describe("the buttons under a notice", () => {
       expect(sent()).toEqual([["ig_1", "user_1", DRAFT]]);
       expect(methods()).toEqual(["editMessageReplyMarkup", "answerCallbackQuery"]);
       expect(answers()[0].text).toBe("已送出 ✅");
+    });
+  });
+
+  describe("a draft that offers one of the owner's tutorials", () => {
+    const OFFER_KEY = "triage:offer:ig_1:user_1";
+
+    it("opens the offer when it is sent as drafted, so the person's yes gets that tutorial", async () => {
+      await escalated({ pageKey: "K26", replyText: "我有做過剪片的教學哦，要的話我把連結傳給你～" });
+      await tap("s");
+      await tap("y");
+
+      expect(sent()).toHaveLength(1);
+      expect(await fakeRedis.get(OFFER_KEY)).toBe("K26");
+    });
+
+    it("opens nothing for a draft that offers none", async () => {
+      await escalated();
+      await tap("s");
+      await tap("y");
+
+      expect(sent()).toHaveLength(1);
+      expect(await fakeRedis.get(OFFER_KEY)).toBeNull();
+    });
+
+    it("opens nothing when the send failed", async () => {
+      mockSendDirectMessage.mockRejectedValue(new Error("nope"));
+      await escalated({ pageKey: "K26" });
+      await tap("s");
+      await tap("y");
+
+      expect(await fakeRedis.get(OFFER_KEY)).toBeNull();
+    });
+
+    it("still reports the reply as sent when the offer could not be stored", async () => {
+      await escalated({ pageKey: "K26" });
+      fakeRedis.failOn = "triage:offer:";
+      await tap("s");
+      await tap("y");
+
+      expect(sent()).toHaveLength(1);
+      expect(row()).toMatchObject({ action: "SENT_BY_OWNER" });
+      expect(answers().at(-1)).toMatchObject({ text: "已送出 ✅" });
     });
   });
 

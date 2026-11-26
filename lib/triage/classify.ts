@@ -4,7 +4,7 @@
  *
  *   "no questions" / "all clear" / "got it"   the sign-off line
  *   "thanks"                                  the thanks line
- *   "I followed you" (已追蹤)                  the tap-the-button line
+ *   "I followed you" (已追蹤)                  the link, like "I never got it"
  *   "I never got the link" (沒收到)            the link, or the follow button, again
  *   "I don't get it" / "it's hard"            the which-step-are-you-stuck-on line
  *   another account's auto-reply              nothing, and nobody is told
@@ -172,6 +172,10 @@ const LEADING_PARTICLES = new RegExp(`^[${PARTICLE_CLASS}]+`, "u");
 
 const MAX_LENGTH = 24;
 
+// A greeting in front changes nothing either: "您好! 我已追蹤" is "我已追蹤".
+// Only in front of something: a greeting on its own is not one of the kinds.
+const GREETING = /^(?:你好|您好|妳好|哈囉|哈啰|嗨|hello|hi|hey)+(?=.)/u;
+
 /** The wording only: lower-cased, with spaces, punctuation and emoji removed. */
 function normalize(text: string): string {
   return text
@@ -244,7 +248,13 @@ export function classifyCanned(text: string): CannedKind | null {
   if (!cleaned) return /\p{Extended_Pictographic}/u.test(text ?? "") ? "ack" : null;
   if (cleaned.length > MAX_LENGTH) return null;
 
-  const kinds = consume(cleaned.replace(PARTICLES, ""), []) ?? consume(cleaned, []);
+  const greeted = cleaned.replace(GREETING, "");
+  const kinds =
+    consume(cleaned.replace(PARTICLES, ""), []) ??
+    consume(cleaned, []) ??
+    (greeted !== cleaned
+      ? consume(greeted.replace(PARTICLES, ""), []) ?? consume(greeted, [])
+      : null);
   if (!kinds || kinds.length === 0) return null;
 
   // "已追蹤，但沒收到" is someone still waiting for their link: nothing else in

@@ -12,12 +12,10 @@ import {
   looksLikeAutoReply,
 } from "@/lib/triage/classify";
 import { dropPendingDrafts } from "@/lib/triage/draft-store";
-import { draftReply } from "@/lib/triage/draft";
+import { draftWithOffer } from "@/lib/triage/draft";
 import {
-  AI_DISCLOSURE_REPLY,
   BATCH_WINDOW_SECONDS,
-  CANNED_REPLIES,
-  HANDOFF_REPLY,
+  DISCLOSURE_REPEAT_SECONDS,
   INVITE_REPEAT_SECONDS,
   OPEN_QUESTION_SECONDS,
   QUOTA_TUTORIAL_PAGE_KEY,
@@ -41,6 +39,8 @@ import {
   ownerRepliedRecently,
   wasAskedHuman,
 } from "@/lib/triage/state";
+import { loadTutorials } from "@/lib/triage/tutorials";
+import { originalLine, writeLine, type LineKind } from "@/lib/triage/wording";
 
 /**
  * DM triage: decide what to do with an inbound DM that no campaign keyword
@@ -48,15 +48,17 @@ import {
  *
  *   "no questions" / "all clear" / "got it"  → the sign-off line
  *   "thanks"                                 → the thanks line
- *   "I followed you"                         → the tap-the-button line
  *   a bare "ok" / "可以" / 👍                 → the sign-off line as well
- *   "I never got the link" / "no button"     → the link again if they follow,
- *                                              the follow button if they do not
+ *   "I never got the link" / "no button",    → the link again if they follow,
+ *     or "I followed you" typed out            the follow button if they do not
  *   "I do not get it" / "it is hard"         → "which step are you stuck on?"
  *   new to AI, asks where to begin           → the where-to-start line
  *   "can I do this on my phone?"             → the use-a-computer line
  *   their Claude quota keeps running out     → an offer of the quota tutorial,
  *                                              sent if they say yes
+ *   wants to learn a topic, or asks for a    → no reply; the owner is told, with
+ *     tutorial on one                          a draft that offers the tutorial
+ *                                              he has made on it, if he has one
  *   a picture or a file                      → no reply; the owner is told
  *   the other account's own auto-reply       → nothing: no reply, no notice
  *   a question the page or the owner's       → an answer in one sentence,
@@ -66,8 +68,11 @@ import {
  *   collaboration, courses, anything else    → no reply; the owner is told
  *
  * Each kind is recognised by a phrase list first and, in the modes that use
- * one, by the model. Only the answer to a question is model-written text;
- * every other reply is a fixed line from config.ts or a fixed action.
+ * one, by the model. What a fixed line says is the owner's decision, written
+ * down in his reply guide. Its words are written for the message at hand
+ * where a model is there to write them, and are his own sentence otherwise
+ * (wording.ts). The answer to a question is written by the model from the
+ * person's page and the guide.
  *
  * A typed message is answered after a short wait (getReplyDelaySeconds): the
  * worker claims it at once with claimTriage and comes back with resumeTriage.
@@ -93,9 +98,12 @@ import {
  *   - If the owner replied by hand in the last 24h, or the sender asked for the
  *     owner, nothing is sent to that person; a real question from them is
  *     still flagged to the owner.
- *   - The same fixed line is not sent to the same person twice within 24h.
+ *   - The same kind of fixed line is not sent to the same person twice within
+ *     24h, and "yes, this is an AI" is not said twice in a row.
  *   - A person gets at most N automatic replies per 24h.
  *   - A link is re-sent once a day; the second "I never got it" is the owner's.
+ *   - The owner hears of every link re-sent, though nothing is asked of him
+ *     (his rule, 11-26).
  *   - In dry_run nothing is sent; the log records what would have been.
  *
  * Nothing here throws: a triage failure must never fail the job or trigger a
@@ -158,6 +166,12 @@ const REASON = {
   noCampaign: "找不到可以重傳的活動",
   queueFailed: "重傳沒有排進去",
   offerTaken: "問過要不要省額度的教學，對方說要",
+  tutorial: "對方在問教學的事，照你說的通知你",
+  tutorialTaken: "你問過要不要這支教學，對方說要，已經傳給他了",
+  followedTyped: "對方打字說已經追蹤了：有追蹤就傳連結，沒追蹤就重傳按鈕那一則",
+  disclosedJustNow: "剛剛才回答過是 AI 在回，不重複",
+  resentTold: "對方說沒收到連結，已經幫他重傳了：有追蹤的拿到連結，沒追蹤的拿到按鈕那一則",
+  followedTold: "對方打字說已經追蹤，已經幫他重傳了：有追蹤的拿到連結，沒追蹤的拿到按鈕那一則",
   merged: "對方接著又傳了新的，跟下一則一起回",
   switchedOff: "處理之前自動分流被關掉了",
 } as const;
@@ -173,15 +187,27 @@ const ATTACHMENT_LABEL = {
 // Kinds whose reply is a courtesy. Going without one costs nothing, so when
 // the daily cap is reached these are simply not sent; anything else that hits
 // the cap is a real question, and the owner is told about it instead.
-const COURTESY = new Set(["no_problem", "thanks", "ack", "followed"]);
+const COURTESY = new Set(["no_problem", "thanks", "ack"]);
 
 // What the log holds in place of a reply when the reply was a campaign message
 // sent by the worker rather than a line of text.
 const RESEND_MARK = "〔重傳連結〕";
 const TUTORIAL_MARK = "〔傳省額度教學〕";
 
-// The lines that end with "feel free to ask".
-const INVITATIONS: string[] = [CANNED_REPLIES.no_problem, CANNED_REPLIES.thanks];
+// The same, for a tutorial the owner offered and the person said yes to.
+const OFFERED_MARK = "〔傳教學〕";
+const MARKS = [RESEND_MARK, TUTORIAL_MARK, OFFERED_MARK];
+
+// The kinds whose line ends with "feel free to ask".
+const INVITING = ["no_problem", "ack", "thanks"];
+
+// "Said once" goes by kind, because the words differ from one time to the
+// next. A bare "ok" and "no questions" get the same line, so they count as
+// one kind.
+const SAME_LINE: Record<string, string[]> = {
+  no_problem: ["no_problem", "ack"],
+  ack: ["no_problem", "ack"],
+};
 
 // What the sender was told counts as part of the conversation so far.
 const SAID = new Set(["REPLIED", "SENT_BY_OWNER"]);
@@ -569,15 +595,22 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
   // A reply for the owner to approve, written only where the owner can act on
   // it: full mode, with a model. Failing to write one is never an error — the
   // notice goes out without it.
-  const writeDraft = async (reason: string): Promise<string | null> => {
+  const writeDraft = async (reason: string) => {
     if (mode !== "full" || !isAiConfigured()) return null;
     try {
-      const [pages, history] = await Promise.all([loadPages(), loadHistory()]);
-      return await draftReply({
+      const [pages, history, tutorials] = await Promise.all([
+        loadPages(),
+        loadHistory(),
+        loadTutorials(account.id),
+      ]);
+      // What the person already holds is not offered to them again.
+      const held = new Set(pages.map((p) => p.key));
+      return await draftWithOffer({
         message: messageText,
         reason,
         pages: pages.map((p) => ({ title: p.title, url: p.url, content: p.content })),
         history,
+        tutorials: tutorials.filter((tutorial) => !held.has(tutorial.key)),
       });
     } catch (error) {
       console.error("[Triage] Could not prepare a draft:", error);
@@ -593,16 +626,23 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
     reason: string,
     options: { draft?: boolean } = {}
   ): Promise<TriageOutcome> => {
-    const text = options.draft === false ? null : await writeDraft(reason);
-    if (!text) {
+    const drafted = options.draft === false ? null : await writeDraft(reason);
+    if (!drafted) {
       await notify(reason);
       return record(category, "ESCALATED", { reason });
     }
+    const text = drafted.draft;
     // One draft per person: this message's draft replaces those of earlier ones.
     await dropDrafts({ olderThan: claimedAt });
     let outcome: TriageOutcome;
     try {
-      outcome = await record(category, "ESCALATED", { reason, replyText: text });
+      // A draft that offers one of the owner's tutorials is stored with which
+      // one, so that sending it opens the offer (see owner-actions.ts).
+      outcome = await record(category, "ESCALATED", {
+        reason,
+        replyText: text,
+        pageKey: drafted.offeredKey,
+      });
     } catch (error) {
       // The draft could not be stored, so its buttons would have nothing to
       // send. The owner still hears about the message, as a plain notice.
@@ -622,9 +662,10 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
   }
 
   const canned = claimed.attachmentKind ? null : classifyCanned(messageText);
-  // "The link never came" matches a phrase list too, but it is no pleasantry:
-  // wherever a pleasantry would be passed over in silence, this is not.
-  const pleasantry = canned !== null && canned !== "missing_link";
+  // "The link never came" and "I followed you" match a phrase list too, but
+  // they are no pleasantries: the person is waiting for a link. Wherever a
+  // pleasantry would be passed over in silence, these are not.
+  const pleasantry = canned !== null && canned !== "missing_link" && canned !== "followed";
 
   const [ownerActive, handedOff, askedHuman] = await Promise.all([
     ownerRepliedRecently(account.instagramId, senderId),
@@ -705,6 +746,39 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
     return record(category, "REPLIED", { ...extra, replyText });
   };
 
+  // Send a line whose meaning is fixed. Its words are written for this
+  // message where a model is there to write them (full and dry run), and are
+  // the owner's own sentence otherwise, or when the written line will not do.
+  const say = async (
+    category: string,
+    kind: LineKind,
+    reason: string | null = null
+  ): Promise<TriageOutcome> => {
+    const original = originalLine(kind);
+    // At the cap nothing goes out, so there is nothing to write.
+    if (mode === "canned" || !isAiConfigured() || (await atDailyCap())) {
+      return deliver(category, original, { reason });
+    }
+    const written = await writeLine({
+      kind,
+      message: messageText,
+      history: await loadHistory(),
+      asked,
+    });
+    const note = written.refused
+      ? `AI 寫的句子不能用（${written.refused}），發的是原句`
+      : null;
+    return deliver(category, written.line, {
+      reason: note ? (reason ? `${reason}｜${note}` : note) : reason,
+    });
+  };
+
+  /** How many lines of these kinds went out to this person in the last day. */
+  const saidToday = (kinds: string[]) =>
+    prisma.triageLog.count({
+      where: { ...sentToSender, category: { in: kinds }, replyText: { notIn: MARKS } },
+    });
+
   // A fixed line is said once. Sending "feel free to ask" again when the
   // sender answers it with "好的" would turn two polite people into a loop.
   // What happens instead depends on the line: a courtesy is just left out; for
@@ -712,14 +786,12 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
   // owner takes over.
   const sayOnce = async (
     category: string,
-    replyText: string,
+    kind: LineKind,
     reason: string | null = null,
     whenRepeated: "ignore" | "tell-owner" | "owner-already-told" = "ignore"
   ): Promise<TriageOutcome> => {
-    const already = await prisma.triageLog.count({
-      where: { ...sentToSender, replyText },
-    });
-    if (already === 0) return deliver(category, replyText, { reason });
+    const already = await saidToday(SAME_LINE[category] ?? [category]);
+    if (already === 0) return say(category, kind, reason);
     if (whenRepeated === "ignore") {
       return record(category, "IGNORED", { reason: reason ?? REASON.repeated });
     }
@@ -748,40 +820,40 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
     if (waitingOnOwner > 0) {
       return record(kind, "IGNORED", { reason: REASON.openQuestion });
     }
-    if (kind !== "thanks") return sayOnce(kind, CANNED_REPLIES.no_problem, reason);
+    if (kind !== "thanks") return sayOnce(kind, "no_problem", reason);
 
     const invitedJustNow = await prisma.triageLog.count({
       where: {
         ...sentToSender,
-        replyText: { in: INVITATIONS },
+        category: { in: INVITING },
         createdAt: { gte: new Date(Date.now() - INVITE_REPEAT_SECONDS * 1000) },
       },
     });
-    return sayOnce(
-      "thanks",
-      invitedJustNow > 0 ? CANNED_REPLIES.thanks_short : CANNED_REPLIES.thanks,
-      reason
-    );
+    return sayOnce("thanks", invitedJustNow > 0 ? "thanks_short" : "thanks", reason);
   };
 
   // "Which step are you stuck on?" is asked once. If the sender still cannot
   // say, the bot has nothing more to offer and the owner hears about it.
   const askWhereStuck = (reason: string | null = null) =>
-    prisma.triageLog
-      .count({ where: { ...sentToSender, replyText: CANNED_REPLIES.stuck } })
-      .then((asked) =>
-        sayOnce(
-          "stuck",
-          CANNED_REPLIES.stuck,
-          asked > 0 ? REASON.stillStuck : reason,
-          "tell-owner"
-        )
-      );
+    saidToday(["stuck"]).then((asked) =>
+      sayOnce("stuck", "stuck", asked > 0 ? REASON.stillStuck : reason, "tell-owner")
+    );
+
+  // Whether "yes, this is an AI" went out to this person a moment ago. Saying
+  // it again under their next message is what a machine does.
+  const disclosedJustNow = async () =>
+    (await prisma.triageLog.count({
+      where: {
+        ...sentToSender,
+        category: { in: ["asks_if_ai"] },
+        createdAt: { gte: new Date(Date.now() - DISCLOSURE_REPEAT_SECONDS * 1000) },
+      },
+    })) > 0;
 
   // "Is this an AI?" is always answered with yes, and with the offer of the
   // owner in person. The offer only stays open if the sender actually saw it.
   const disclose = async (reason: string): Promise<TriageOutcome> => {
-    const outcome = await deliver("asks_if_ai", AI_DISCLOSURE_REPLY, { reason });
+    const outcome = await say("asks_if_ai", "ai_disclosure", reason);
     if (outcome.action === "REPLIED") {
       await markAskedHuman(account.instagramId, senderId);
     }
@@ -797,7 +869,7 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
       await markHandoff(account.instagramId, senderId);
       await clearAskedHuman(account.instagramId, senderId);
     }
-    return sayOnce("wants_human", HANDOFF_REPLY, reason, "owner-already-told");
+    return sayOnce("wants_human", "handoff", reason, "owner-already-told");
   };
 
   // Send a campaign's own message to this person, the way a tap on its button
@@ -808,13 +880,16 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
     category: string,
     automationId: string,
     mark: string,
-    reason: string
+    reason: string,
+    pageKey: string | null = null
   ): Promise<TriageOutcome> => {
     if (await atDailyCap()) {
       await notify(REASON.cap);
-      return record(category, "SKIPPED_CAP", { replyText: mark, reason: REASON.cap });
+      return record(category, "SKIPPED_CAP", { replyText: mark, pageKey, reason: REASON.cap });
     }
-    if (mode === "dry_run") return record(category, "DRY_RUN", { replyText: mark, reason });
+    if (mode === "dry_run") {
+      return record(category, "DRY_RUN", { replyText: mark, pageKey, reason });
+    }
     try {
       await getDMQueue().add(
         POSTBACK_JOB_NAME,
@@ -830,27 +905,36 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
       console.error("[Triage] Could not queue a campaign message:", error);
       return escalate(category, REASON.queueFailed);
     }
-    return record(category, "REPLIED", { replyText: mark, reason });
+    return record(category, "REPLIED", { replyText: mark, pageKey, reason });
   };
 
-  // "I never got the link." Sent again once; a second time means the re-send
-  // did not help, and the owner looks.
-  const resendLink = async (reason: string): Promise<TriageOutcome> => {
+  // "I never got the link", or "I followed you" typed out by someone who did
+  // not tap the button again. Sent once; a second time means the re-send did
+  // not help, and the owner looks.
+  const resendLink = async (
+    category: "missing_link" | "followed",
+    reason: string
+  ): Promise<TriageOutcome> => {
     const campaign = priorLogs.find((log) => log.automation.isActive)?.automation;
-    if (!campaign) return escalate("missing_link", REASON.noCampaign);
+    if (!campaign) return escalate(category, REASON.noCampaign);
     if (
       mode !== "dry_run" &&
       !(await claimResend(account.instagramId, senderId, campaign.id))
     ) {
-      return escalate("missing_link", REASON.resentAlready);
+      return escalate(category, REASON.resentAlready);
     }
-    return sendCampaign("missing_link", campaign.id, RESEND_MARK, reason);
+    const outcome = await sendCampaign(category, campaign.id, RESEND_MARK, reason);
+    // Handled, and the owner hears of it all the same: he asked to (11-26).
+    if (outcome.action === "REPLIED") {
+      await notify(category === "followed" ? REASON.followedTold : REASON.resentTold);
+    }
+    return outcome;
   };
 
-  // The campaign that delivers the quota tutorial, if it is running.
-  const findTutorialCampaign = async (): Promise<string | null> => {
+  // The running campaign that delivers a tutorial page, if there is one.
+  const findCampaignForPage = async (key: string): Promise<string | null> => {
     const page = await prisma.triagePage.findFirst({
-      where: { instagramAccountId: account.id, key: QUOTA_TUTORIAL_PAGE_KEY },
+      where: { instagramAccountId: account.id, key },
       select: { url: true },
     });
     if (!page?.url) return null;
@@ -870,11 +954,14 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
   // if they say yes. Someone who already holds that tutorial is not offered it
   // again; the owner hears about them instead.
   const offerTutorial = async (reason: string): Promise<TriageOutcome> => {
-    const [campaignId, pages] = await Promise.all([findTutorialCampaign(), loadPages()]);
+    const [campaignId, pages] = await Promise.all([
+      findCampaignForPage(QUOTA_TUTORIAL_PAGE_KEY),
+      loadPages(),
+    ]);
     if (!campaignId || pages.some((page) => page.key === QUOTA_TUTORIAL_PAGE_KEY)) {
       return escalate("quota", reason);
     }
-    const outcome = await sayOnce("quota", CANNED_REPLIES.quota_offer, reason, "tell-owner");
+    const outcome = await sayOnce("quota", "quota_offer", reason, "tell-owner");
     if (outcome.action === "REPLIED") {
       await markOffered(account.instagramId, senderId, "quota");
     }
@@ -888,13 +975,15 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
     }
     if (answersNo(messageText)) {
       await clearAskedHuman(account.instagramId, senderId);
-      return sayOnce("no_problem", CANNED_REPLIES.no_problem, REASON.declinedHuman);
+      return sayOnce("no_problem", "no_problem", REASON.declinedHuman);
     }
   }
 
-  // We offered the quota tutorial — a plain yes takes it, a plain no closes
-  // the offer and the message is handled like any other.
-  if ((await getOffered(account.instagramId, senderId)) === "quota") {
+  // A tutorial was offered: the quota one by us, or one of the owner's in a
+  // draft he sent. A plain yes takes it, a plain no closes the offer and the
+  // message is handled like any other.
+  const offered = await getOffered(account.instagramId, senderId);
+  if (offered) {
     const takesIt =
       answersYes(messageText) ||
       (messageText.trim().length <= OFFER_ANSWER_MAX_CHARS &&
@@ -903,23 +992,46 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
         TAKES_OFFER.test(messageText));
     if (takesIt) {
       await clearOffered(account.instagramId, senderId);
-      const campaignId = await findTutorialCampaign();
-      if (!campaignId) return escalate("quota", REASON.noCampaign);
-      return sendCampaign("quota", campaignId, TUTORIAL_MARK, REASON.offerTaken);
+      if (offered === "quota") {
+        const campaignId = await findCampaignForPage(QUOTA_TUTORIAL_PAGE_KEY);
+        if (!campaignId) return escalate("quota", REASON.noCampaign);
+        return sendCampaign("quota", campaignId, TUTORIAL_MARK, REASON.offerTaken);
+      }
+      const campaignId = await findCampaignForPage(offered);
+      if (!campaignId) return escalate("tutorial", REASON.noCampaign);
+      const outcome = await sendCampaign(
+        "tutorial",
+        campaignId,
+        OFFERED_MARK,
+        REASON.tutorialTaken,
+        offered
+      );
+      // The owner asked to hear about everything to do with tutorials.
+      if (outcome.action === "REPLIED") await notify(REASON.tutorialTaken);
+      return outcome;
     }
     if (answersNo(messageText)) await clearOffered(account.instagramId, senderId);
   }
 
-  if (asksIfAutomated(messageText)) return disclose(REASON.askedIfAi);
+  if (asksIfAutomated(messageText)) {
+    // Asked again a moment later: it has been answered.
+    if (await disclosedJustNow()) {
+      return record("asks_if_ai", "IGNORED", { reason: REASON.disclosedJustNow });
+    }
+    return disclose(REASON.askedIfAi);
+  }
   if (asksForHuman(messageText)) return handOff(REASON.wantsHuman);
 
-  if (canned === "missing_link") return resendLink(REASON.missingLink);
+  if (canned === "missing_link") return resendLink("missing_link", REASON.missingLink);
+  // Someone who types that they followed is waiting for the link the button
+  // would have sent: the owner's rule (11-25) is to send it, not to explain
+  // the button.
+  if (canned === "followed") return resendLink("followed", REASON.followedTyped);
   // A bare "可以" or 👍 is nearly always the answer to "does that make sense?",
   // so it closes the same way as "no questions". Said once: if the line has
   // already gone out, the acknowledgement of it is left alone.
   if (canned === "ack") return courtesy("ack", REASON.ack);
   if (canned === "stuck") return askWhereStuck();
-  if (canned === "followed") return sayOnce("followed", CANNED_REPLIES.followed);
   if (canned) return courtesy(canned);
 
   // Not one of the fixed cases. The model only runs where its verdict could be
@@ -947,9 +1059,16 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
               reason: verdict.reason,
             });
           case "missing_link":
-            return resendLink(verdict.reason || REASON.missingLink);
+            return resendLink("missing_link", verdict.reason || REASON.missingLink);
           case "quota":
             return offerTutorial(verdict.reason);
+          case "tutorial":
+            // The owner asked to hear of every one of these (11-26): no reply
+            // goes out, and the draft may offer a tutorial he has made.
+            return escalate(
+              "tutorial",
+              verdict.reason ? `問教學的事：${verdict.reason}` : REASON.tutorial
+            );
           case "no_question":
           case "thanks": {
             if (isPlainSignOff(messageText)) {
@@ -964,14 +1083,27 @@ async function handle(claimed: Claimed): Promise<TriageOutcome> {
           case "stuck":
             return askWhereStuck(verdict.reason);
           case "where_to_start":
-            return sayOnce("where_to_start", CANNED_REPLIES.where_to_start, verdict.reason);
+            return sayOnce("where_to_start", "where_to_start", verdict.reason);
           case "device":
-            return sayOnce("use_computer", CANNED_REPLIES.use_computer, verdict.reason);
-          case "asks_if_ai":
+            return sayOnce("use_computer", "use_computer", verdict.reason);
+          case "asks_if_ai": {
+            const justSaid = await disclosedJustNow();
             // A long message that also asks this has more in it; the owner reads it.
-            if (isShort(messageText)) return disclose(verdict.reason || REASON.askedIfAi);
+            if (isShort(messageText) && !justSaid) {
+              const outcome = await disclose(verdict.reason || REASON.askedIfAi);
+              // "Are you an AI? And teach me to edit video": the honest answer
+              // goes out either way, and the owner hears about the rest.
+              if (verdict.more) await notify(verdict.reason || REASON.askedIfAi);
+              return outcome;
+            }
+            // Asked again a moment later, and nothing else: it has been answered.
+            if (justSaid && isShort(messageText) && !verdict.more) {
+              return record("asks_if_ai", "IGNORED", { reason: REASON.disclosedJustNow });
+            }
+            // Whatever else the message asks is the owner's to answer.
             escalationReason = verdict.reason;
             break;
+          }
           case "wants_human":
             return handOff(verdict.reason || REASON.wantsHuman);
           case "auto_reply":

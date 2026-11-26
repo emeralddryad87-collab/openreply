@@ -2,6 +2,7 @@ import { createDMWorker } from "@/lib/queue/dm-worker";
 import { recordWorkerHeartbeat } from "@/lib/ops/worker-health";
 import { reconcileComments } from "@/lib/polling/comment-reconciler";
 import { describeAi, isAiConfigured } from "@/lib/triage/ai";
+import { checkAiConnection } from "@/lib/triage/ai-check";
 import { isNotifyConfigured } from "@/lib/triage/config";
 import { checkNotifyChannel } from "@/lib/triage/notify-check";
 import { recordWorkerCapabilities } from "@/lib/triage/state";
@@ -41,6 +42,7 @@ async function heartbeat() {
     await recordWorkerCapabilities({
       ai: isAiConfigured(),
       aiModel: describeAi(),
+      aiCheck: await checkAiConnection(),
       notify: isNotifyConfigured(),
       notifyCheck: await checkNotifyChannel(),
       replyButtons: replyButtonsReady(),

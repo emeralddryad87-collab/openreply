@@ -109,6 +109,30 @@ function describe(error: unknown): Error {
   return new Error(`AI 呼叫失敗（${error instanceof Error ? error.name : "Error"}）`);
 }
 
+export type ClaudeCheck = "ok" | "bad_key" | "bad_model" | "failed";
+
+/**
+ * Ask Anthropic for the model's own entry. It costs nothing and answers two
+ * questions at once: is this key accepted, and does this model exist for it?
+ * "failed" is everything else — no network, Anthropic unwell — and says
+ * nothing about the settings. Never throws.
+ */
+export async function checkClaude(apiKey: string, model: string): Promise<ClaudeCheck> {
+  try {
+    await clientFor(apiKey).models.retrieve(model);
+    return "ok";
+  } catch (error) {
+    if (
+      error instanceof Anthropic.AuthenticationError ||
+      error instanceof Anthropic.PermissionDeniedError
+    ) {
+      return "bad_key";
+    }
+    if (error instanceof Anthropic.NotFoundError) return "bad_model";
+    return "failed";
+  }
+}
+
 /** The visible text of a reply. Thinking blocks come first and carry no text. */
 function textOf(content: ReadonlyArray<{ type: string; text?: unknown }>): string {
   return content

@@ -18,9 +18,12 @@ export function parseTriageMode(value: unknown): TriageMode {
   return TRIAGE_MODES.includes(value as TriageMode) ? (value as TriageMode) : "off";
 }
 
-// The fixed lines. Every one of them is the account owner's own wording or was
-// approved by them; nothing sent to a sender is improvised except an answer
-// written from the sender's page.
+// The owner's own sentences for the situations whose reply is fixed. Since
+// 11-26 what is fixed is the meaning: where a model is at hand the words are
+// written for the message being answered (wording.ts), and these are what
+// goes out when there is no model or its line will not do. They are quoted
+// in the reply guide too, where the model learns from them; a test keeps the
+// two the same.
 export const CANNED_REPLIES = {
   // "no questions" / "all clear" / "got it"
   no_problem: "好的哦，如果有任何問題都歡迎來問我~",
@@ -32,8 +35,6 @@ export const CANNED_REPLIES = {
   // Someone whose Claude quota keeps running out: an offer, not a link. The
   // tutorial is sent only if they say yes.
   quota_offer: "我有做過省額度的教學哦，如果要的話我可以把連結傳給你～",
-  // "I followed you", typed instead of tapping the button that sends the link.
-  followed: "追蹤後請按上一則訊息的按鈕，就會收到連結～",
   // "I do not know how to use it" / "it is hard", with no word about which part.
   stuck: "請問你是哪一步卡住了呢？可以截圖給我看嘛？",
   // Someone who has just subscribed to an AI tool and asks where to begin.
@@ -78,6 +79,9 @@ export const OPEN_QUESTION_SECONDS = 30 * 60;
 
 /** Inside this window a second line does not repeat the invitation to ask. */
 export const INVITE_REPEAT_SECONDS = 10 * 60;
+
+/** Inside this window "yes, this is an AI" is not said a second time. */
+export const DISCLOSURE_REPEAT_SECONDS = 10 * 60;
 
 /** Messages a person sends this close together are answered as one. */
 export const BATCH_WINDOW_SECONDS = 5 * 60;

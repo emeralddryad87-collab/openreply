@@ -41,6 +41,8 @@ interface TriageData {
     ai: boolean;
     /** Which model answers, e.g. "Claude（claude-opus-5-5）". Unset on an older worker. */
     aiModel?: string | null;
+    /** Whether that model was proven to answer. Unset on an older worker. */
+    aiCheck?: "ok" | "bad_key" | "bad_model" | "failed" | "unchecked" | "unconfigured";
     notify: boolean;
     notifyCheck?: "ok" | "failed" | "pending" | "unchecked" | "unconfigured";
     /** Unset on a worker older than the buttons under a notice. */
@@ -59,12 +61,12 @@ const MODES: { value: TriageMode; label: string; hint: string }[] = [
   {
     value: "canned",
     label: "只開固定回覆",
-    hint: "對方說「沒問題」「了解」「可以」「謝謝」「看不懂」會自動回固定句；說沒收到連結會重傳（有追蹤給連結，沒追蹤給按鈕）；問是不是 AI 會照實說是。其他的通知你。",
+    hint: "對方說「沒問題」「了解」「可以」「謝謝」「看不懂」會自動回固定句；說沒收到連結、或打字說已經追蹤，會重傳（有追蹤給連結，沒追蹤給按鈕）；問是不是 AI 會照實說是。其他的通知你。",
   },
   {
     value: "full",
     label: "全開",
-    hint: "固定回覆，再加上照留言連結頁和常見問題，用一句話回答問題。合作、課程和答不出來的通知你，並附上草稿：你在 Telegram 按「送出」才會發。",
+    hint: "固定的幾種情況照你定的意思回，字由 AI 照你的語氣寫；再加上照留言連結頁和回覆指南，用一句話回答問題。問教學的事、合作、課程和答不出來的通知你，並附上草稿：你在 Telegram 按「送出」才會發。",
   },
 ];
 
@@ -103,9 +105,15 @@ function Pill({ tone, children }: { tone: keyof typeof TONE; children: ReactNode
   );
 }
 
-function StatusPill({ ok, unknown }: { ok: boolean; unknown?: boolean }) {
-  if (unknown) return <Pill tone="muted">讀不到</Pill>;
-  return <Pill tone={ok ? "ok" : "warn"}>{ok ? "已設定" : "還沒設定"}</Pill>;
+/** The model, like the notification channel, is proven and not just read. */
+function AiPill({ worker }: { worker: TriageData["worker"] }) {
+  if (!worker) return <Pill tone="muted">讀不到</Pill>;
+  if (!worker.ai) return <Pill tone="warn">還沒設定</Pill>;
+  if (worker.aiCheck === "ok") return <Pill tone="ok">已接上，AI 有回應</Pill>;
+  if (worker.aiCheck === "bad_key") return <Pill tone="error">金鑰不對，AI 不接受</Pill>;
+  if (worker.aiCheck === "bad_model") return <Pill tone="error">模型名稱不對</Pill>;
+  if (worker.aiCheck === "failed") return <Pill tone="warn">設定了，但現在連不上</Pill>;
+  return <Pill tone="ok">已設定</Pill>;
 }
 
 /** The notification channel is the one setting that is proven, not just read. */
@@ -212,6 +220,16 @@ export function TriageSettings() {
         if ((account.mode === "full" || account.mode === "dry_run") && data.worker && !data.worker.ai) {
           warnings.push("AI 金鑰還沒設定，問連結內容的訊息會全部轉給你。");
         }
+        if (on && data.worker?.aiCheck === "bad_key") {
+          warnings.push(
+            "AI 金鑰是錯的，Claude 不接受。現在需要 AI 判斷的訊息都只會通知你、沒有草稿。到 Railway 把 ANTHROPIC_API_KEY 換成正確的值。"
+          );
+        }
+        if (on && data.worker?.aiCheck === "bad_model") {
+          warnings.push(
+            "TRIAGE_CLAUDE_MODEL 填的模型名稱 Claude 不認得。現在需要 AI 判斷的訊息都只會通知你、沒有草稿。"
+          );
+        }
         if ((account.mode === "full" || account.mode === "dry_run") && account.pageCount === 0) {
           warnings.push("還沒有頁面資料，AI 沒有東西可以參考。");
         }
@@ -266,7 +284,7 @@ export function TriageSettings() {
                   <p className="mt-0.5 text-xs text-muted">現在用的是 {data.worker.aiModel}</p>
                 )}
               </div>
-              <StatusPill ok={Boolean(data.worker?.ai)} unknown={!data.worker} />
+              <AiPill worker={data.worker} />
             </div>
             <div className="flex items-center justify-between gap-3 border-b border-border py-3">
               <p className="text-sm text-foreground">通知你的管道</p>

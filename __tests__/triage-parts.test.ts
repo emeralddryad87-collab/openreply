@@ -143,15 +143,32 @@ describe("parseVerdict", () => {
     ).toBe("other");
   });
 
+  it("notes when the message asks for something besides the kind it was sorted into", () => {
+    expect(
+      parseVerdict('{"category":"asks_if_ai","answer":"","reason":"問是不是 AI，還想學剪片","more":true}')
+    ).toEqual({
+      category: "asks_if_ai",
+      answer: null,
+      reason: "問是不是 AI，還想學剪片",
+      more: true,
+    });
+    // Anything but a plain true is a no: the default is that nothing was left out.
+    for (const more of ["false", '"true"', "1", "null"]) {
+      expect(
+        parseVerdict(`{"category":"asks_if_ai","answer":"","reason":"r","more":${more}}`)
+      ).not.toHaveProperty("more");
+    }
+  });
+
   it("offers the model exactly the kinds the code knows what to do with", () => {
     expect([...VERDICT_SCHEMA.properties.category.enum].sort()).toEqual(
       [
         "asks_if_ai", "auto_reply", "device", "missing_link", "no_question", "other",
-        "page_question", "quota", "stuck", "thanks", "wants_human", "where_to_start",
+        "page_question", "quota", "stuck", "thanks", "tutorial", "wants_human", "where_to_start",
       ].sort()
     );
     expect(VERDICT_SCHEMA.additionalProperties).toBe(false);
-    expect([...VERDICT_SCHEMA.required]).toEqual(["category", "answer", "reason"]);
+    expect([...VERDICT_SCHEMA.required]).toEqual(["category", "answer", "reason", "more"]);
     // Every kind the model may name is read back as that kind, or as an answer.
     for (const category of VERDICT_SCHEMA.properties.category.enum) {
       const verdict = parseVerdict(
@@ -241,7 +258,8 @@ describe("buildMessages", () => {
     const rules = buildMessages("q", [{ title: "t", content: "c" }])[0].content;
 
     it("carries the owner's standing answers, in the owner's wording", () => {
-      expect(rules).toContain("【常見問題】");
+      expect(rules).toContain("【回覆指南】");
+      expect(rules).toContain("## 常見問題");
       expect(rules).toContain("免費版沒辦法哦，這個要用到 Claude Code，要 Pro 以上才有～");
       expect(rules).toContain("Pro 就很夠用了哦，一個月 20 美金，真的常常用到上限再升級就好～");
       expect(rules).toContain("可以哦，Windows 跟 Mac 都能用，只是要用電腦，手機目前沒辦法～");
@@ -250,7 +268,7 @@ describe("buildMessages", () => {
     });
 
     it("picks the free-plan wording by whether the page is about Claude Code", () => {
-      expect(rules).toContain("先看【頁面內容】裡有沒有出現「Claude Code」這幾個字");
+      expect(rules).toContain("先看對方拿到的頁面裡有沒有出現「Claude Code」這幾個字");
       expect(rules).toContain("免費版沒辦法哦，要 Pro 以上才有～");
     });
 

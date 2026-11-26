@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockCreate, mockBetaCreate, mockConstructed } = vi.hoisted(() => ({
+const { mockCreate, mockBetaCreate, mockRetrieve, mockConstructed } = vi.hoisted(() => ({
   mockCreate: vi.fn(),
   mockBetaCreate: vi.fn(),
+  mockRetrieve: vi.fn(),
   mockConstructed: vi.fn(),
 }));
 
@@ -33,6 +34,16 @@ vi.mock("@anthropic-ai/sdk", () => {
       super(402, "payment required");
     }
   }
+  class PermissionDeniedError extends APIError {
+    constructor() {
+      super(403, "forbidden");
+    }
+  }
+  class NotFoundError extends APIError {
+    constructor() {
+      super(404, "model not found");
+    }
+  }
   class RateLimitError extends APIError {
     constructor() {
       super(429, "rate limited");
@@ -59,11 +70,14 @@ vi.mock("@anthropic-ai/sdk", () => {
     static BadRequestError = BadRequestError;
     static AuthenticationError = AuthenticationError;
     static PaymentRequiredError = PaymentRequiredError;
+    static PermissionDeniedError = PermissionDeniedError;
+    static NotFoundError = NotFoundError;
     static RateLimitError = RateLimitError;
     static InternalServerError = InternalServerError;
     static APIConnectionError = APIConnectionError;
     static APIConnectionTimeoutError = APIConnectionTimeoutError;
     messages = { create: mockCreate };
+    models = { retrieve: mockRetrieve };
     beta = { messages: { create: mockBetaCreate } };
     constructor(options: unknown) {
       mockConstructed(options);
@@ -73,7 +87,7 @@ vi.mock("@anthropic-ai/sdk", () => {
 });
 
 import Anthropic from "@anthropic-ai/sdk";
-import { askClaude, getClaudeUsage, resetClaudeUsage } from "@/lib/triage/claude";
+import { askClaude, checkClaude, getClaudeUsage, resetClaudeUsage } from "@/lib/triage/claude";
 
 // The stand-in's error classes take a message at most; the SDK's own take
 // the whole HTTP response. Tests build the stand-in's.
@@ -303,5 +317,32 @@ describe("askClaude", () => {
       const error = (await ask().catch((e: Error) => e)) as Error;
       expect(error.message).not.toContain("sk-ant");
     });
+  });
+});
+
+describe("checkClaude", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRetrieve.mockResolvedValue({ id: "claude-opus-5-5" });
+  });
+
+  it("asks Anthropic for the model's own entry, which costs nothing", async () => {
+    expect(await checkClaude("sk-ant-test", "claude-opus-5-5")).toBe("ok");
+    expect(mockRetrieve).toHaveBeenCalledWith("claude-opus-5-5");
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockBetaCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a key Anthropic refuses", () => new sdkError.AuthenticationError(), "bad_key"],
+    ["a key that may not be used", () => new sdkError.PermissionDeniedError(), "bad_key"],
+    ["a model name Anthropic does not know", () => new sdkError.NotFoundError(), "bad_model"],
+    ["too many requests", () => new sdkError.RateLimitError(), "failed"],
+    ["Anthropic being unwell", () => new sdkError.InternalServerError(), "failed"],
+    ["no network", () => new sdkError.APIConnectionError(), "failed"],
+    ["anything else", () => new Error("boom"), "failed"],
+  ])("reports %s", async (_what, make, expected) => {
+    mockRetrieve.mockRejectedValue(make());
+    await expect(checkClaude("sk-ant-test", "claude-opus-5-5")).resolves.toBe(expected);
   });
 });

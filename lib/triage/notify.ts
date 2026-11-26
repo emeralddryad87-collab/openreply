@@ -358,6 +358,28 @@ export async function sendHelloNotice(): Promise<boolean> {
 }
 
 /**
+ * Tell the owner that something in the set-up needs them — not about a
+ * person's message. Sent to the same chat the notices arrive in. Returns true
+ * when Telegram accepted it. Never throws.
+ */
+export async function sendOwnerAlert(text: string): Promise<boolean> {
+  const { telegramBotToken, telegramChatId } = getNotifyConfig();
+  if (!telegramBotToken || !telegramChatId) return false;
+  try {
+    const sent = await telegram(telegramBotToken, "sendMessage", {
+      chat_id: telegramChatId,
+      text,
+      disable_web_page_preview: true,
+    });
+    return sent !== null;
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    console.error(`[Triage] Telegram alert failed (${name})`);
+    return false;
+  }
+}
+
+/**
  * Tell the owner. Returns true when the notice was delivered. Never throws.
  *
  * `ring: true` is for the notice that must not arrive silently — someone

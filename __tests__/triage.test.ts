@@ -10,6 +10,9 @@ const {
   mockDraftReply,
   mockDropPendingDrafts,
   mockQueueAdd,
+  mockWriteLine,
+  mockLoadTutorials,
+  draftOffer,
 } = vi.hoisted(() => ({
   mockPrisma: {
     instagramAccount: { findUnique: vi.fn() },
@@ -45,6 +48,10 @@ const {
   mockDraftReply: vi.fn(),
   mockDropPendingDrafts: vi.fn(),
   mockQueueAdd: vi.fn(),
+  mockWriteLine: vi.fn(),
+  mockLoadTutorials: vi.fn(),
+  // The tutorial the next draft offers to send, by its page key.
+  draftOffer: { key: null as string | null },
 }));
 
 vi.mock("@/lib/db/client", () => ({ prisma: mockPrisma }));
@@ -56,7 +63,20 @@ vi.mock("@/lib/triage/ai", () => ({
   answerFromPages: mockAnswerFromPages,
   isAiConfigured: mockIsAiConfigured,
 }));
-vi.mock("@/lib/triage/draft", () => ({ draftReply: mockDraftReply }));
+// A draft is its text (mockDraftReply) and the tutorial it offers, if any.
+vi.mock("@/lib/triage/draft", () => ({
+  draftReply: mockDraftReply,
+  draftWithOffer: async (input: unknown) => {
+    const draft = await mockDraftReply(input);
+    return draft ? { draft, offeredKey: draftOffer.key } : null;
+  },
+}));
+// The owner's own sentences are the real ones; only the writing is stubbed.
+vi.mock("@/lib/triage/wording", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/triage/wording")>()),
+  writeLine: mockWriteLine,
+}));
+vi.mock("@/lib/triage/tutorials", () => ({ loadTutorials: mockLoadTutorials }));
 vi.mock("@/lib/triage/draft-store", () => ({ dropPendingDrafts: mockDropPendingDrafts }));
 vi.mock("@/lib/queue/client", () => ({
   getDMQueue: () => ({ add: mockQueueAdd }),
@@ -64,6 +84,7 @@ vi.mock("@/lib/queue/client", () => ({
 }));
 
 import { claimTriage, resumeTriage, runTriage } from "@/lib/triage";
+import { originalLine, type LineKind } from "@/lib/triage/wording";
 
 const SIGN_OFF = "好的哦，如果有任何問題都歡迎來問我~";
 const THANKS = "不用客氣~ 有問題都可以問我";
@@ -113,27 +134,67 @@ function setMode(mode: string | null) {
   });
 }
 
-type CountWhere = { action?: unknown; replyText?: string | { in: string[] } };
+type CountWhere = {
+  action?: unknown;
+  category?: { in: string[] };
+  replyText?: unknown;
+  createdAt?: { gte: Date };
+};
+
+// "Said once" goes by the kind of line, whatever its words were that time.
+const KIND_OF_LINE: Record<string, string> = {
+  [SIGN_OFF]: "no_problem",
+  [THANKS]: "thanks",
+  [THANKS_SHORT]: "thanks",
+  [QUOTA_OFFER]: "quota",
+  [DISCLOSURE]: "asks_if_ai",
+  [HANDOFF]: "wants_human",
+  [STUCK]: "stuck",
+  [WHERE_TO_START]: "where_to_start",
+  [USE_COMPUTER]: "use_computer",
+};
 
 /**
  * What the log already holds for this sender: how many automatic replies in
- * the last 24h, which fixed lines were among them, how many of their
- * questions are still waiting for the owner, and whether a line that invites
- * questions went out a moment ago.
+ * the last 24h, which fixed lines were among them (by their original
+ * sentence, or by kind), how many of their questions are still waiting for
+ * the owner, and whether a line that invites questions, or the answer to
+ * "is this an AI?", went out a moment ago.
  */
 function alreadySent({
   replies = 0,
   lines = [] as string[],
   waitingOnOwner = 0,
   invitedJustNow = false,
+  disclosedJustNow = false,
 } = {}) {
+  const kinds = lines.map((line) => KIND_OF_LINE[line] ?? line);
   mockPrisma.triageLog.count.mockImplementation(async ({ where }: { where: CountWhere }) => {
     if (where.action === "ESCALATED") return waitingOnOwner;
-    if (typeof where.replyText === "object") return invitedJustNow ? 1 : 0;
-    if (where.replyText === undefined) return replies;
-    return lines.includes(where.replyText) ? 1 : 0;
+    // No kind asked for: every automatic reply of the day, for the cap.
+    if (!where.category) return replies;
+    // Kinds inside a short window: did one of them go out a moment ago?
+    if (where.replyText === undefined) {
+      const asked = where.category.in.includes("asks_if_ai") ? disclosedJustNow : invitedJustNow;
+      return asked ? 1 : 0;
+    }
+    // "Said once": a line of one of these kinds, today.
+    return where.category.in.some((kind) => kinds.includes(kind)) ? 1 : 0;
   });
 }
+
+// Every test starts with no model-written line (the owner's own sentence goes
+// out, as it did before lines were written), no tutorials, and no offer.
+beforeEach(() => {
+  mockWriteLine.mockReset();
+  mockWriteLine.mockImplementation(async ({ kind }: { kind: LineKind }) => ({
+    line: originalLine(kind),
+    written: false,
+  }));
+  mockLoadTutorials.mockReset();
+  mockLoadTutorials.mockResolvedValue([]);
+  draftOffer.key = null;
+});
 
 /** The count calls that decide the daily cap and "said once": not the other two. */
 function replyCounts() {
@@ -327,20 +388,54 @@ describe("runTriage", () => {
       }
     );
 
-    it("tells someone who typed that they followed to tap the button", async () => {
+    // The owner's rule (11-25): someone who followed but did not tap the button
+    // again is sent the link, not told about the button.
+    it.each(["已追蹤", "我追蹤了喔", "您好! 我已追蹤", "hi 已經追蹤了"])(
+      "sends the campaign again to someone who types %s, and lets the worker check the follow",
+      async (messageText) => {
+        const outcome = await send(messageText);
+
+        expect(outcome).toEqual({
+          category: "followed",
+          action: "REPLIED",
+          replyText: "〔重傳連結〕",
+        });
+        expect(mockQueueAdd).toHaveBeenCalledWith(
+          "process-postback",
+          {
+            instagramAccountId: "ig_1",
+            userId: "user_1",
+            payload: "followcheck:auto_1",
+            strictFollow: true,
+          },
+          { jobId: "triage_send_auto_1_log_1" }
+        );
+        // Triage itself types nothing: the campaign's own message goes out.
+        expect(sent()).toEqual([]);
+        expect(mockAnswerFromPages).not.toHaveBeenCalled();
+        // The owner hears of it all the same, without his phone ringing: his rule (11-26).
+        expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+        expect(mockNotifyOwner.mock.calls[0][0].reason).toBe(
+          "對方打字說已經追蹤，已經幫他重傳了：有追蹤的拿到連結，沒追蹤的拿到按鈕那一則"
+        );
+        expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
+      }
+    );
+
+    it("tells the owner instead when he is in the conversation himself: the person is waiting", async () => {
+      mockState.ownerRepliedRecently.mockResolvedValue(true);
       const outcome = await send("已追蹤");
-      expect(outcome).toMatchObject({ category: "followed", action: "REPLIED" });
-      expect(sent()).toEqual(["追蹤後請按上一則訊息的按鈕，就會收到連結～"]);
-      expect(mockAnswerFromPages).not.toHaveBeenCalled();
-      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({ category: "followed", action: "SKIPPED_OWNER_ACTIVE" });
+      expect(mockQueueAdd).not.toHaveBeenCalled();
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
     });
 
-    it("says that once: typing it again does not get the line again, or a notice", async () => {
-      alreadySent({ replies: 1, lines: ["追蹤後請按上一則訊息的按鈕，就會收到連結～"] });
+    it("does that once a day: typed again, the owner looks", async () => {
+      mockState.claimResend.mockResolvedValue(false);
       const outcome = await send("追蹤了");
-      expect(outcome?.action).toBe("IGNORED");
-      expect(sent()).toEqual([]);
-      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({ category: "followed", action: "ESCALATED" });
+      expect(mockQueueAdd).not.toHaveBeenCalled();
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
     });
 
     it("sends someone who followed but got nothing to the owner", async () => {
@@ -1340,9 +1435,16 @@ describe("runTriage — the conversation so far", () => {
       expect(sent()).toEqual(["照第一步做。"]);
     });
 
-    it("is not asked at all for a phrase with a fixed answer", async () => {
+    it("is not asked to sort a phrase with a fixed answer; only the line's writer reads the turns", async () => {
       await send("謝謝");
       expect(mockAnswerFromPages).not.toHaveBeenCalled();
+      expect(mockPrisma.triageLog.findMany).toHaveBeenCalledTimes(1);
+      expect(mockWriteLine).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads no earlier turns in canned mode, where nothing is written", async () => {
+      setMode("canned");
+      await send("謝謝");
       expect(mockPrisma.triageLog.findMany).not.toHaveBeenCalled();
     });
   });
@@ -1397,10 +1499,11 @@ describe("runTriage — the conversation so far", () => {
       expect(sent()).toEqual(["照第一步做。"]);
     });
 
-    it("still tells someone who typed that they followed to tap the button", async () => {
+    it("still sends the link to someone who typed that they followed", async () => {
       alreadySent({ waitingOnOwner: 1 });
-      await send("已追蹤");
-      expect(sent()).toEqual(["追蹤後請按上一則訊息的按鈕，就會收到連結～"]);
+      const outcome = await send("已追蹤");
+      expect(outcome).toMatchObject({ category: "followed", action: "REPLIED" });
+      expect(mockQueueAdd).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1419,17 +1522,19 @@ describe("runTriage — the conversation so far", () => {
       expect(sent()).toEqual([THANKS]);
     });
 
-    it("asks about the two inviting lines, sent in the last ten minutes", async () => {
+    it("asks about the kinds of line that invite questions, sent in the last ten minutes", async () => {
       await send("謝謝");
       const where = mockPrisma.triageLog.count.mock.calls
         .map((call) => call[0].where as CountWhere & Record<string, unknown>)
-        .find((w: CountWhere) => typeof w.replyText === "object") as Record<string, unknown> & {
+        .find(
+          (w: CountWhere) => w.category !== undefined && w.replyText === undefined
+        ) as Record<string, unknown> & {
         createdAt: { gte: Date };
       };
       expect(where).toMatchObject({
         senderId: "user_1",
         action: "REPLIED",
-        replyText: { in: [SIGN_OFF, THANKS] },
+        category: { in: ["no_problem", "ack", "thanks"] },
       });
       const age = Date.now() - where.createdAt.gte.getTime();
       expect(age).toBeGreaterThanOrEqual(10 * 60 * 1000);
@@ -1585,7 +1690,12 @@ describe("runTriage — the link never came", () => {
       // Triage itself types nothing: the campaign's own message is what goes out.
       expect(sent()).toEqual([]);
       expect(mockAnswerFromPages).not.toHaveBeenCalled();
-      expect(mockNotifyOwner).not.toHaveBeenCalled();
+      // The owner hears of it all the same, without his phone ringing: his rule (11-26).
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0][0].reason).toBe(
+        "對方說沒收到連結，已經幫他重傳了：有追蹤的拿到連結，沒追蹤的拿到按鈕那一則"
+      );
+      expect(mockNotifyOwner.mock.calls[0][1]).toEqual({ ring: false });
       expect(mockState.claimResend).toHaveBeenCalledWith("ig_1", "user_1", "auto_1");
     }
   );
@@ -2187,6 +2297,420 @@ describe("claimTriage and resumeTriage — answering after a wait", () => {
         .map((call) => call[0].where as CountWhere & Record<string, unknown>)
         .find((w: CountWhere) => w.action === "ESCALATED");
       expect(where).toMatchObject({ id: { notIn: ["log_2", "log_1"] } });
+    });
+  });
+});
+
+describe("runTriage — asking whether it is an AI, and something else besides", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMode("full");
+    alreadySent();
+    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1", createdAt: CLAIMED_AT });
+    mockPrisma.triageLog.update.mockResolvedValue({});
+    mockPrisma.triageLog.findMany.mockResolvedValue([]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([PRIOR_LOG]);
+    mockPrisma.triagePage.findMany.mockResolvedValue([]);
+    mockDraftReply.mockResolvedValue(null);
+    mockDropPendingDrafts.mockResolvedValue(0);
+    mockState.ownerRepliedRecently.mockResolvedValue(false);
+    mockState.handedOffRecently.mockResolvedValue(false);
+    mockState.wasAskedHuman.mockResolvedValue(false);
+    mockState.markBotActivity.mockResolvedValue(undefined);
+    mockState.markAskedHuman.mockResolvedValue(undefined);
+    mockState.getOffered.mockResolvedValue(null);
+    mockNotifyOwner.mockResolvedValue(true);
+    mockIsAiConfigured.mockReturnValue(true);
+    mockSendDirectMessage.mockResolvedValue({ recipient_id: "user_1", message_id: "m" });
+  });
+
+  it("says yes, as always, and tells the owner about the rest", async () => {
+    mockAnswerFromPages.mockResolvedValue({
+      category: "asks_if_ai",
+      answer: null,
+      reason: "問是哪個 AI 模型；後半想學影片剪輯，要本人處理",
+      more: true,
+    });
+    const outcome = await send("先說一下妳是opus 還是haiku 模型？然後一步一步教我影片剪輯");
+
+    expect(outcome).toMatchObject({ category: "asks_if_ai", action: "REPLIED" });
+    expect(sent()).toEqual([DISCLOSURE]);
+    expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+    expect(mockNotifyOwner.mock.calls[0][0]).toMatchObject({
+      messageText: "先說一下妳是opus 還是haiku 模型？然後一步一步教我影片剪輯",
+      reason: "問是哪個 AI 模型；後半想學影片剪輯，要本人處理",
+    });
+    // The question "do you want the owner?" is open as usual.
+    expect(mockState.markAskedHuman).toHaveBeenCalledWith("ig_1", "user_1");
+  });
+
+  it("tells the owner nothing when that was all the message asked", async () => {
+    mockAnswerFromPages.mockResolvedValue({
+      category: "asks_if_ai",
+      answer: null,
+      reason: "問回覆的是不是 Claude",
+    });
+    await send("你是Claude回覆嗎？如果是的話是opus or haiku");
+
+    expect(sent()).toEqual([DISCLOSURE]);
+    expect(mockNotifyOwner).not.toHaveBeenCalled();
+  });
+});
+
+describe("runTriage — a fixed line, in words written for the message", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMode("full");
+    alreadySent();
+    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1", createdAt: CLAIMED_AT });
+    mockPrisma.triageLog.update.mockResolvedValue({});
+    mockPrisma.triageLog.findMany.mockResolvedValue([]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([PRIOR_LOG]);
+    mockPrisma.triagePage.findMany.mockResolvedValue([]);
+    mockDraftReply.mockResolvedValue(null);
+    mockDropPendingDrafts.mockResolvedValue(0);
+    mockState.ownerRepliedRecently.mockResolvedValue(false);
+    mockState.handedOffRecently.mockResolvedValue(false);
+    mockState.wasAskedHuman.mockResolvedValue(false);
+    mockState.getOffered.mockResolvedValue(null);
+    mockState.markBotActivity.mockResolvedValue(undefined);
+    mockState.markAskedHuman.mockResolvedValue(undefined);
+    mockNotifyOwner.mockResolvedValue(true);
+    mockIsAiConfigured.mockReturnValue(true);
+    mockAnswerFromPages.mockResolvedValue({ category: "other", answer: null, reason: "x" });
+    mockSendDirectMessage.mockResolvedValue({ recipient_id: "user_1", message_id: "m" });
+  });
+
+  const written = (line: string) => mockWriteLine.mockResolvedValue({ line, written: true });
+
+  it("sends what the writer wrote, for a phrase the list knows", async () => {
+    written("不客氣哦～有問題再跟我說");
+    const outcome = await send("謝謝你！");
+
+    expect(outcome).toEqual({
+      category: "thanks",
+      action: "REPLIED",
+      replyText: "不客氣哦～有問題再跟我說",
+    });
+    expect(sent()).toEqual(["不客氣哦～有問題再跟我說"]);
+    // With the question the campaign asked: a short message is often its answer.
+    expect(mockWriteLine).toHaveBeenCalledWith({
+      kind: "thanks",
+      message: "謝謝你！",
+      history: [],
+      asked: FOLLOW_UP,
+    });
+    // The phrase list settled the kind: the model that sorts is not asked.
+    expect(mockAnswerFromPages).not.toHaveBeenCalled();
+  });
+
+  it("does the same when it was the model that sorted the message", async () => {
+    mockAnswerFromPages.mockResolvedValue({ category: "no_question", answer: null, reason: "還沒試" });
+    written("好的哦，試了有問題再來問我～");
+    await send("未有時間試，但今晚會試下");
+
+    expect(sent()).toEqual(["好的哦，試了有問題再來問我～"]);
+    expect(mockWriteLine.mock.calls[0][0]).toMatchObject({ kind: "no_problem" });
+  });
+
+  it("shows the writer the earlier turns, so it does not say the same thing twice", async () => {
+    mockPrisma.triageLog.findMany.mockResolvedValue([
+      { messageText: "沒問題", action: "REPLIED", replyText: SIGN_OFF },
+    ]);
+    await send("謝謝");
+    expect(mockWriteLine.mock.calls[0][0].history).toEqual([
+      { from: "them", text: "沒問題" },
+      { from: "us", text: SIGN_OFF },
+    ]);
+  });
+
+  it("sends the owner's own sentence when the written line will not do, and says why", async () => {
+    mockWriteLine.mockResolvedValue({ line: SIGN_OFF, written: false, refused: "帶了問句" });
+    await send("沒有問題");
+
+    expect(sent()).toEqual([SIGN_OFF]);
+    expect(logged().reason).toBe("AI 寫的句子不能用（帶了問句），發的是原句");
+  });
+
+  it("keeps the reason for the reply, and adds why the written line was not used", async () => {
+    mockAnswerFromPages.mockResolvedValue({ category: "thanks", answer: null, reason: "稱讚" });
+    mockWriteLine.mockResolvedValue({ line: THANKS, written: false, refused: "帶了數字" });
+    await send("寫得很用心");
+    expect(logged().reason).toBe("稱讚｜AI 寫的句子不能用（帶了數字），發的是原句");
+  });
+
+  it("asks no writer in canned mode: there the owner's own sentences are all that is sent", async () => {
+    setMode("canned");
+    await send("謝謝");
+    expect(sent()).toEqual([THANKS]);
+    expect(mockWriteLine).not.toHaveBeenCalled();
+  });
+
+  it("asks no writer when no model is set up", async () => {
+    mockIsAiConfigured.mockReturnValue(false);
+    await send("謝謝");
+    expect(sent()).toEqual([THANKS]);
+    expect(mockWriteLine).not.toHaveBeenCalled();
+  });
+
+  it("asks no writer at the daily cap: nothing will be sent", async () => {
+    alreadySent({ replies: 6 });
+    const outcome = await send("謝謝");
+    expect(outcome?.action).toBe("SKIPPED_CAP");
+    expect(mockWriteLine).not.toHaveBeenCalled();
+  });
+
+  it("asks no writer for a kind already said today, whatever its words were", async () => {
+    alreadySent({ replies: 1, lines: ["thanks"] });
+    const outcome = await send("感謝");
+    expect(outcome?.action).toBe("IGNORED");
+    expect(sent()).toEqual([]);
+    expect(mockWriteLine).not.toHaveBeenCalled();
+  });
+
+  it("treats a bare ok and 'no questions' as the same line", async () => {
+    alreadySent({ replies: 1, lines: ["ack"] });
+    const outcome = await send("沒有問題");
+    expect(outcome?.action).toBe("IGNORED");
+    expect(sent()).toEqual([]);
+  });
+
+  it("asks for a thanks without the invitation right after a line that invited questions", async () => {
+    alreadySent({ replies: 1, invitedJustNow: true });
+    written("不客氣哦～");
+    await send("謝謝");
+    expect(mockWriteLine.mock.calls[0][0]).toMatchObject({ kind: "thanks_short" });
+    expect(sent()).toEqual(["不客氣哦～"]);
+  });
+
+  it("has every other fixed line written too", async () => {
+    const kindFor = async (category: string, messageText: string) => {
+      mockWriteLine.mockClear();
+      mockAnswerFromPages.mockResolvedValue({ category, answer: null, reason: "r" });
+      await send(messageText);
+      return mockWriteLine.mock.calls[0]?.[0].kind;
+    };
+    expect(await kindFor("stuck", "我看了還是做不出來耶")).toBe("stuck");
+    expect(await kindFor("where_to_start", "我剛訂閱，不知道能拿來做什麼")).toBe("where_to_start");
+    expect(await kindFor("device", "這個可以用 iPad 做嗎")).toBe("use_computer");
+    expect(await kindFor("wants_human", "可以請他本人看一下嗎")).toBe("handoff");
+  });
+});
+
+describe("runTriage — 'is this an AI?' is not answered twice in a row", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMode("full");
+    alreadySent();
+    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1", createdAt: CLAIMED_AT });
+    mockPrisma.triageLog.update.mockResolvedValue({});
+    mockPrisma.triageLog.findMany.mockResolvedValue([]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([PRIOR_LOG]);
+    mockPrisma.triagePage.findMany.mockResolvedValue([]);
+    mockDraftReply.mockResolvedValue(null);
+    mockDropPendingDrafts.mockResolvedValue(0);
+    mockState.ownerRepliedRecently.mockResolvedValue(false);
+    mockState.handedOffRecently.mockResolvedValue(false);
+    mockState.wasAskedHuman.mockResolvedValue(false);
+    mockState.getOffered.mockResolvedValue(null);
+    mockState.markBotActivity.mockResolvedValue(undefined);
+    mockState.markAskedHuman.mockResolvedValue(undefined);
+    mockNotifyOwner.mockResolvedValue(true);
+    mockIsAiConfigured.mockReturnValue(true);
+    mockAnswerFromPages.mockResolvedValue({ category: "other", answer: null, reason: "x" });
+    mockSendDirectMessage.mockResolvedValue({ recipient_id: "user_1", message_id: "m" });
+  });
+
+  it("answers in words written for the question, and opens 'do you want the owner?'", async () => {
+    mockWriteLine.mockResolvedValue({ line: "是 AI 在回哦～你想找本人嗎？", written: true });
+    const outcome = await send("你是AI嗎");
+
+    expect(outcome).toMatchObject({ category: "asks_if_ai", action: "REPLIED" });
+    expect(sent()).toEqual(["是 AI 在回哦～你想找本人嗎？"]);
+    expect(mockWriteLine.mock.calls[0][0]).toMatchObject({ kind: "ai_disclosure" });
+    expect(mockState.markAskedHuman).toHaveBeenCalledWith("ig_1", "user_1");
+  });
+
+  it("says nothing when the same question comes again a moment later", async () => {
+    alreadySent({ replies: 1, disclosedJustNow: true });
+    const outcome = await send("你是AI嗎");
+
+    expect(outcome).toMatchObject({ category: "asks_if_ai", action: "IGNORED" });
+    expect(logged().reason).toBe("剛剛才回答過是 AI 在回，不重複");
+    expect(sent()).toEqual([]);
+    expect(mockNotifyOwner).not.toHaveBeenCalled();
+  });
+
+  it("looks ten minutes back for the answer it gave", async () => {
+    await send("你是AI嗎");
+    const where = mockPrisma.triageLog.count.mock.calls
+      .map((call) => call[0].where as CountWhere & Record<string, unknown>)
+      .find((w: CountWhere) => w.category?.in.includes("asks_if_ai")) as Record<string, unknown> & {
+      createdAt: { gte: Date };
+    };
+    expect(where).toMatchObject({ senderId: "user_1", action: "REPLIED" });
+    const age = Date.now() - where.createdAt.gte.getTime();
+    expect(age).toBeGreaterThanOrEqual(10 * 60 * 1000);
+    expect(age).toBeLessThan(10 * 60 * 1000 + 5000);
+  });
+
+  // The conversation of 2026-11-26: the model was asked twice in a minute, and
+  // the second message went on to ask for a tutorial.
+  it("hands the rest to the owner when the second message asks for more", async () => {
+    alreadySent({ replies: 1, disclosedJustNow: true });
+    mockAnswerFromPages.mockResolvedValue({
+      category: "asks_if_ai",
+      answer: null,
+      reason: "又問是哪個模型；後半想學影片剪輯",
+      more: true,
+    });
+    const outcome = await send("先說一下妳是opus 還是haiku 模型？然後一步一步教我影片剪輯");
+
+    expect(outcome).toMatchObject({ category: "other", action: "ESCALATED" });
+    expect(sent()).toEqual([]);
+    expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+    expect(mockNotifyOwner.mock.calls[0][0].reason).toBe("又問是哪個模型；後半想學影片剪輯");
+  });
+
+  it("says nothing when the model reads a second question that asks nothing else", async () => {
+    alreadySent({ replies: 1, disclosedJustNow: true });
+    mockAnswerFromPages.mockResolvedValue({ category: "asks_if_ai", answer: null, reason: "又問一次" });
+    const outcome = await send("所以真的是機器在回我喔");
+
+    expect(outcome).toMatchObject({ category: "asks_if_ai", action: "IGNORED" });
+    expect(sent()).toEqual([]);
+    expect(mockNotifyOwner).not.toHaveBeenCalled();
+  });
+});
+
+describe("runTriage — questions about tutorials are the owner's", () => {
+  const OFFER = "我有做過剪片的教學哦，要的話我把連結傳給你～";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMode("full");
+    alreadySent();
+    mockPrisma.triageLog.create.mockResolvedValue({ id: "log_1", createdAt: CLAIMED_AT });
+    mockPrisma.triageLog.update.mockResolvedValue({});
+    mockPrisma.triageLog.findMany.mockResolvedValue([]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([PRIOR_LOG]);
+    mockPrisma.triagePage.findMany.mockResolvedValue([
+      { key: "K36", title: "三個音效外掛", content: "安裝步驟…", url: "https://example.com/page", keywords: [] },
+    ]);
+    mockPrisma.triagePage.findFirst.mockResolvedValue({ url: "https://example.com/k26" });
+    mockPrisma.automation.findFirst.mockResolvedValue({ id: "auto_k26" });
+    mockQueueAdd.mockResolvedValue({});
+    mockDraftReply.mockResolvedValue(null);
+    mockDropPendingDrafts.mockResolvedValue(0);
+    mockState.ownerRepliedRecently.mockResolvedValue(false);
+    mockState.handedOffRecently.mockResolvedValue(false);
+    mockState.wasAskedHuman.mockResolvedValue(false);
+    mockState.getOffered.mockResolvedValue(null);
+    mockState.clearOffered.mockResolvedValue(undefined);
+    mockNotifyOwner.mockResolvedValue(true);
+    mockIsAiConfigured.mockReturnValue(true);
+    mockAnswerFromPages.mockResolvedValue({ category: "tutorial", answer: null, reason: "想學影片剪輯" });
+    mockLoadTutorials.mockResolvedValue([
+      { key: "K26", title: "讓 Claude 幫你剪影片：我的做法" },
+      { key: "K36", title: "三個音效外掛" },
+    ]);
+  });
+
+  it("sends nothing and tells the owner, saying what it is about", async () => {
+    const outcome = await send("可以教我影片剪輯嗎？");
+
+    expect(outcome).toMatchObject({ category: "tutorial", action: "ESCALATED" });
+    expect(sent()).toEqual([]);
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+    expect(mockNotifyOwner.mock.calls[0][0].reason).toBe("問教學的事：想學影片剪輯");
+  });
+
+  it("gives the draft writer the owner's tutorials, without the one the person already holds", async () => {
+    await send("可以教我影片剪輯嗎？");
+    expect(mockDraftReply.mock.calls[0][0].tutorials).toEqual([
+      { key: "K26", title: "讓 Claude 幫你剪影片：我的做法" },
+    ]);
+  });
+
+  it("keeps which tutorial the draft offers with the draft", async () => {
+    mockDraftReply.mockResolvedValue(OFFER);
+    draftOffer.key = "K26";
+    await send("可以教我影片剪輯嗎？");
+
+    expect(logged()).toMatchObject({
+      category: "tutorial",
+      action: "ESCALATED",
+      replyText: OFFER,
+      pageKey: "K26",
+    });
+    expect(mockNotifyOwner.mock.calls[0][0].draft).toMatchObject({ logId: "log_1", text: OFFER });
+  });
+
+  it("keeps no tutorial with a draft that offers none", async () => {
+    mockDraftReply.mockResolvedValue("這個我還沒做過耶～你是想做出什麼樣的東西呢？");
+    await send("可以出一集教 Gemini 嗎？");
+    expect(logged()).toMatchObject({ action: "ESCALATED", pageKey: null });
+  });
+
+  it("still tells the owner when there is no list to read", async () => {
+    mockLoadTutorials.mockResolvedValue([]);
+    const outcome = await send("可以教我影片剪輯嗎？");
+    expect(outcome?.action).toBe("ESCALATED");
+    expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+  });
+
+  describe("after the owner sent a draft that offers a tutorial", () => {
+    beforeEach(() => {
+      mockState.getOffered.mockResolvedValue("K26");
+    });
+
+    it.each(["要", "好啊", "傳給我", "好的謝謝"])("sends that tutorial when the person says %s", async (yes) => {
+      const outcome = await send(yes);
+
+      expect(outcome).toEqual({ category: "tutorial", action: "REPLIED", replyText: "〔傳教學〕" });
+      expect(mockPrisma.triagePage.findFirst.mock.calls[0][0].where).toMatchObject({ key: "K26" });
+      expect(mockQueueAdd).toHaveBeenCalledWith(
+        "process-postback",
+        {
+          instagramAccountId: "ig_1",
+          userId: "user_1",
+          payload: "followcheck:auto_k26",
+          strictFollow: true,
+        },
+        { jobId: "triage_send_auto_k26_log_1" }
+      );
+      expect(logged()).toMatchObject({ pageKey: "K26" });
+      expect(mockState.clearOffered).toHaveBeenCalledWith("ig_1", "user_1");
+      expect(mockAnswerFromPages).not.toHaveBeenCalled();
+    });
+
+    it("tells the owner it was sent: he asked to hear of everything about tutorials", async () => {
+      await send("要");
+      expect(mockNotifyOwner).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwner.mock.calls[0][0].reason).toBe(
+        "你問過要不要這支教學，對方說要，已經傳給他了"
+      );
+    });
+
+    it("hands it to the owner when no running campaign delivers that tutorial any more", async () => {
+      mockPrisma.automation.findFirst.mockResolvedValue(null);
+      const outcome = await send("要");
+      expect(outcome).toMatchObject({ category: "tutorial", action: "ESCALATED" });
+      expect(mockQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it("closes the offer on a no, and sends nothing", async () => {
+      mockAnswerFromPages.mockResolvedValue({ category: "other", answer: null, reason: "x" });
+      await send("不用了");
+      expect(mockState.clearOffered).toHaveBeenCalledWith("ig_1", "user_1");
+      expect(mockQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it("does not take 'not now' for a yes", async () => {
+      mockAnswerFromPages.mockResolvedValue({ category: "other", answer: null, reason: "x" });
+      await send("先不要給我");
+      expect(mockQueueAdd).not.toHaveBeenCalled();
     });
   });
 });

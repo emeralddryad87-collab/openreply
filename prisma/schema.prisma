@@ -411,7 +411,8 @@ model TriageLog {
   messageId          String
   messageText        String
   /// no_problem | thanks | ack | followed | stuck | page_question | missing_link |
-  /// quota | attachment | auto_reply | other | merged | pending (see lib/triage)
+  /// quota | tutorial | attachment | auto_reply | other | merged | pending (see
+  /// lib/triage)
   category           String
   /// REPLIED | DRY_RUN | ESCALATED | IGNORED | SKIPPED_OWNER_ACTIVE | SKIPPED_CAP | FAILED
   /// | SENT_BY_OWNER (a draft the owner sent from the notice). An ESCALATED row
@@ -422,6 +423,8 @@ model TriageLog {
   /// The triage mode in effect when the message was handled.
   mode               String
   replyText          String?
+  /// The page an answer was written from; on a draft, the tutorial the draft
+  /// offers to send, if it offers one.
   pageKey            String?
   reason             String?
   createdAt          DateTime @default(now())

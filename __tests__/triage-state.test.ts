@@ -44,6 +44,7 @@ const { fakeRedis } = vi.hoisted(() => {
 vi.mock("@/lib/queue/client", () => ({ getRedisConnection: () => fakeRedis }));
 
 import {
+  claimAiAlert,
   claimNotifySlot,
   claimResend,
   clearAskedHuman,
@@ -336,5 +337,22 @@ describe("re-sending a link that never came", () => {
     expect(await claimResend("ig_1", "user_2", "auto_1")).toBe(true);
     expect(await claimResend("ig_1", "user_1", "auto_2")).toBe(true);
     expect(await claimResend("ig_2", "user_1", "auto_1")).toBe(true);
+  });
+});
+
+describe("telling the owner that a model setting is refused", () => {
+  it("is done once in six hours for the same setting", async () => {
+    expect(await claimAiAlert("bad_key:abc")).toBe(true);
+    expect(await claimAiAlert("bad_key:abc")).toBe(false);
+    vi.advanceTimersByTime(5 * HOUR);
+    expect(await claimAiAlert("bad_key:abc")).toBe(false);
+    vi.advanceTimersByTime(2 * HOUR);
+    expect(await claimAiAlert("bad_key:abc")).toBe(true);
+  });
+
+  it("is done again for a different key or a different problem", async () => {
+    expect(await claimAiAlert("bad_key:abc")).toBe(true);
+    expect(await claimAiAlert("bad_key:def")).toBe(true);
+    expect(await claimAiAlert("bad_model:abc")).toBe(true);
   });
 });

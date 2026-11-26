@@ -13,6 +13,7 @@ import {
   getEditPrompt,
   getNoticeThread,
   markBotActivity,
+  markOffered,
   saveEditPrompt,
   type NoticeLine,
 } from "@/lib/triage/state";
@@ -41,6 +42,10 @@ import {
  *   - A draft older than Instagram's 24-hour reply window is not sent.
  *   - A tap that arrives late — the worker was restarting — does not send; the
  *     owner is asked to tap again, in case they have answered by hand since.
+ *
+ * A draft may offer one of the owner's tutorials ("I made one on that, shall
+ * I send you the link?"). Sending it as drafted opens that offer: the
+ * person's "yes" then gets the tutorial through its campaign.
  *
  * What goes out this way counts as the bot's sending, not as the owner typing
  * in Instagram: triage keeps looking after the conversation, so the next
@@ -121,6 +126,7 @@ async function sendReply(
       instagramAccountId: true,
       action: true,
       replyText: true,
+      pageKey: true,
       senderId: true,
       createdAt: true,
       instagramAccount: { select: { instagramId: true, accessToken: true } },
@@ -186,6 +192,16 @@ async function sendReply(
       .update({ where: { id: logId }, data: { action: "FAILED", reason: detail } })
       .catch(() => {});
     return { status: "failed", logId, text, why: plainFailure(error), ...target };
+  }
+
+  // A draft that offered one of the owner's tutorials, sent as drafted: the
+  // offer is open, and the person's "yes" will send that tutorial (see
+  // lib/triage/index.ts). The owner's own words may offer something else or
+  // nothing, so they open no offer. Housekeeping: the reply is already out.
+  if (ownWords === null && row.pageKey) {
+    await markOffered(target.instagramAccountId, target.senderId, row.pageKey).catch(
+      () => {}
+    );
   }
 
   // The person has their answer: a draft still waiting for one of their

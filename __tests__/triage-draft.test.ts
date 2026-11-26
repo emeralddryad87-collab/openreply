@@ -310,8 +310,18 @@ describe("what the draft writer is told", () => {
     expect(rules).toContain("合作、業配、報價、他的課程和教學服務、怎麼收費：這些他要親自回，draft 填空字串");
   });
 
-  it("is never to say what tutorials the owner has or has not made: it sees one page of them", () => {
-    expect(rules).toContain("也不要說他「有」或「還沒有」做過某個主題的教學或影片");
+  it("is to offer a tutorial only from the list of what the owner has made", () => {
+    expect(rules).toContain("看【他做過的教學】，那是他現在能傳給粉絲的全部");
+    expect(rules).toContain("offers 填那一支的編號");
+    expect(rules).toContain("草稿裡不要貼教學的網址");
+  });
+
+  it("is never to say what he has or has not made when the topic is not on the list", () => {
+    expect(rules).toContain("不要說他「有」或「還沒有」做過，也不要推薦別的工具、app 或網站");
+  });
+
+  it("is not to recommend tools the owner never taught", () => {
+    expect(rules).toContain("不要推薦創作者沒教過的工具、app 或網站");
   });
 
   it("is to pick up a question that was never really answered", () => {
@@ -319,7 +329,8 @@ describe("what the draft writer is told", () => {
   });
 
   it("includes the owner's standing answers", () => {
-    expect(rules).toContain("【常見問題】");
+    expect(rules).toContain("【回覆指南】");
+    expect(rules).toContain("## 常見問題");
     expect(rules).toContain("免費版沒辦法哦，這個要用到 Claude Code，要 Pro 以上才有～");
   });
 });
